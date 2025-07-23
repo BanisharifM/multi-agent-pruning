@@ -427,7 +427,7 @@ Examples:
     
     # Setup logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
-    setup_logging(level=log_level)
+    setup_logging(log_level="INFO")
     
     # Create downloader
     downloader = ModelDownloader(cache_dir=args.cache_dir, num_workers=args.num_workers)

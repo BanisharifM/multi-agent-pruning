@@ -168,8 +168,13 @@ def setup_logging(log_level: str = "INFO",
     
     # Configure root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(getattr(logging, log_level.upper()))
-    
+    # DELETE
+    # root_logger.setLevel(getattr(logging, log_level.upper()))
+    if isinstance(log_level, int):
+        root_logger.setLevel(log_level)
+    else:
+        root_logger.setLevel(getattr(logging, log_level.upper()))
+ 
     # Clear existing handlers
     root_logger.handlers.clear()
     
