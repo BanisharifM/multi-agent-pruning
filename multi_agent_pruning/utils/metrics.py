@@ -17,6 +17,187 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def compute_macs(model: nn.Module, input_shape: Tuple[int, ...] = (1, 3, 224, 224)) -> int:
+    """
+    Compute the number of Multiply-Accumulate operations (MACs) for a model.
+    
+    Args:
+        model: PyTorch model
+        input_shape: Input tensor shape (batch_size, channels, height, width)
+        
+    Returns:
+        Total number of MACs
+    """
+    
+    def conv_mac_count(module, input, output):
+        """Calculate MACs for convolution layers."""
+        if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+            # Get input and output dimensions
+            batch_size = input[0].shape[0]
+            output_dims = output.shape[2:]  # Spatial dimensions
+            kernel_dims = module.kernel_size
+            in_channels = module.in_channels
+            out_channels = module.out_channels
+            groups = module.groups
+            
+            # Calculate MACs
+            kernel_flops = np.prod(kernel_dims) * in_channels // groups
+            output_elements = batch_size * out_channels * np.prod(output_dims)
+            macs = kernel_flops * output_elements
+            
+            module.__macs__ += macs
+    
+    def linear_mac_count(module, input, output):
+        """Calculate MACs for linear layers."""
+        if isinstance(module, nn.Linear):
+            batch_size = input[0].shape[0]
+            macs = batch_size * module.in_features * module.out_features
+            module.__macs__ += macs
+    
+    def bn_mac_count(module, input, output):
+        """Calculate MACs for batch normalization layers."""
+        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            batch_size = input[0].shape[0]
+            num_features = input[0].numel() // batch_size
+            # BN requires 2 operations per feature (subtract mean, divide by std)
+            macs = 2 * batch_size * num_features
+            module.__macs__ += macs
+    
+    def relu_mac_count(module, input, output):
+        """Calculate MACs for ReLU layers (minimal)."""
+        if isinstance(module, (nn.ReLU, nn.ReLU6, nn.LeakyReLU)):
+            # ReLU is essentially free in terms of MACs
+            module.__macs__ += 0
+    
+    # Initialize MAC counters
+    for module in model.modules():
+        module.__macs__ = 0
+    
+    # Register hooks
+    handles = []
+    for module in model.modules():
+        if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+            handles.append(module.register_forward_hook(conv_mac_count))
+        elif isinstance(module, nn.Linear):
+            handles.append(module.register_forward_hook(linear_mac_count))
+        elif isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            handles.append(module.register_forward_hook(bn_mac_count))
+        elif isinstance(module, (nn.ReLU, nn.ReLU6, nn.LeakyReLU)):
+            handles.append(module.register_forward_hook(relu_mac_count))
+    
+    # Create dummy input and run forward pass
+    device = next(model.parameters()).device
+    dummy_input = torch.randn(*input_shape).to(device)
+    
+    model.eval()
+    with torch.no_grad():
+        _ = model(dummy_input)
+    
+    # Sum up all MACs
+    total_macs = sum(module.__macs__ for module in model.modules())
+    
+    # Clean up hooks and MAC counters
+    for handle in handles:
+        handle.remove()
+    
+    for module in model.modules():
+        if hasattr(module, '__macs__'):
+            delattr(module, '__macs__')
+    
+    return int(total_macs)
+
+def compute_params(model: nn.Module) -> Dict[str, int]:
+    """
+    Compute detailed parameter counts for a model.
+    
+    Args:
+        model: PyTorch model
+        
+    Returns:
+        Dictionary with parameter count details
+    """
+    
+    total_params = 0
+    trainable_params = 0
+    non_trainable_params = 0
+    
+    # Count by layer type
+    layer_params = {
+        'conv': 0,
+        'linear': 0,
+        'bn': 0,
+        'embedding': 0,
+        'other': 0
+    }
+    
+    for name, param in model.named_parameters():
+        param_count = param.numel()
+        total_params += param_count
+        
+        if param.requires_grad:
+            trainable_params += param_count
+        else:
+            non_trainable_params += param_count
+        
+        # Categorize by layer type
+        if 'conv' in name.lower():
+            layer_params['conv'] += param_count
+        elif 'linear' in name.lower() or 'fc' in name.lower():
+            layer_params['linear'] += param_count
+        elif 'bn' in name.lower() or 'norm' in name.lower():
+            layer_params['bn'] += param_count
+        elif 'embed' in name.lower():
+            layer_params['embedding'] += param_count
+        else:
+            layer_params['other'] += param_count
+    
+    return {
+        'total': total_params,
+        'trainable': trainable_params,
+        'non_trainable': non_trainable_params,
+        'by_layer_type': layer_params
+    }
+
+def compute_model_complexity(model: nn.Module, input_shape: Tuple[int, ...] = (1, 3, 224, 224)) -> Dict[str, Any]:
+    """
+    Compute comprehensive model complexity metrics.
+    
+    Args:
+        model: PyTorch model
+        input_shape: Input tensor shape
+        
+    Returns:
+        Dictionary with complexity metrics
+    """
+    
+    # Compute parameters
+    param_info = compute_params(model)
+    
+    # Compute MACs
+    try:
+        macs = compute_macs(model, input_shape)
+        # Convert to GMACs (Giga MACs)
+        gmacs = macs / 1e9
+    except Exception as e:
+        logger.warning(f"Failed to compute MACs: {e}")
+        macs = 0
+        gmacs = 0.0
+    
+    # Compute model size in MB
+    param_size_mb = sum(p.numel() * p.element_size() for p in model.parameters()) / (1024 * 1024)
+    buffer_size_mb = sum(b.numel() * b.element_size() for b in model.buffers()) / (1024 * 1024)
+    total_size_mb = param_size_mb + buffer_size_mb
+    
+    return {
+        'parameters': param_info,
+        'macs': macs,
+        'gmacs': gmacs,
+        'model_size_mb': total_size_mb,
+        'param_size_mb': param_size_mb,
+        'buffer_size_mb': buffer_size_mb,
+        'input_shape': input_shape
+    }
+
 @dataclass
 class AccuracyResult:
     """Container for accuracy measurement results."""

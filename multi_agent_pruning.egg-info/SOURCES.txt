@@ -17,4 +17,9 @@ multi_agent_pruning/core/isomorphic_analyzer.py
 multi_agent_pruning/core/pruning_engine.py
 multi_agent_pruning/core/recovery_engine.py
 multi_agent_pruning/core/state_manager.py
+multi_agent_pruning/utils/__init__.py
+multi_agent_pruning/utils/helpers.py
+multi_agent_pruning/utils/logger.py
+multi_agent_pruning/utils/metrics.py
+multi_agent_pruning/utils/profiler.py
 tests/test_enhanced_system.py
