@@ -236,9 +236,10 @@ print(f'✅ CIFAR-10 dataset: {len(dataset)} images')
 ```bash
 # Prune DeiT-Small to 50% parameter reduction
 multi-agent-prune \
-    --model deit_small \
+    --model deit_small_patch16_224 \
     --dataset imagenet \
     --target-ratio 0.5 \
+    --data-path /path/to/imagenet \
     --output-dir ./results/deit_small_50pct
 
 # With custom configuration
