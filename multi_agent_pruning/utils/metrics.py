@@ -17,6 +17,126 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class PruningMetrics:
+    """
+    Comprehensive metrics tracking for pruning experiments.
+    Tracks accuracy, efficiency, and other performance indicators.
+    """
+    
+    # Accuracy metrics
+    accuracy_history: List[float] = field(default_factory=list)
+    top5_accuracy_history: List[float] = field(default_factory=list)
+    loss_history: List[float] = field(default_factory=list)
+    
+    # Efficiency metrics
+    macs_history: List[int] = field(default_factory=list)
+    params_history: List[int] = field(default_factory=list)
+    inference_time_history: List[float] = field(default_factory=list)
+    memory_usage_history: List[float] = field(default_factory=list)
+    
+    # Pruning-specific metrics
+    sparsity_history: List[float] = field(default_factory=list)
+    pruning_ratio_history: List[float] = field(default_factory=list)
+    
+    # Phase tracking
+    phase_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    
+    # Timestamps
+    timestamps: List[float] = field(default_factory=list)
+    
+    def record_accuracy(self, accuracy: float, top5_accuracy: Optional[float] = None, 
+                       loss: Optional[float] = None):
+        """Record accuracy metrics."""
+        self.accuracy_history.append(accuracy)
+        if top5_accuracy is not None:
+            self.top5_accuracy_history.append(top5_accuracy)
+        if loss is not None:
+            self.loss_history.append(loss)
+        self.timestamps.append(time.time())
+    
+    def record_efficiency(self, macs: Optional[int] = None, params: Optional[int] = None,
+                         inference_time: Optional[float] = None, memory_usage: Optional[float] = None):
+        """Record efficiency metrics."""
+        if macs is not None:
+            self.macs_history.append(macs)
+        if params is not None:
+            self.params_history.append(params)
+        if inference_time is not None:
+            self.inference_time_history.append(inference_time)
+        if memory_usage is not None:
+            self.memory_usage_history.append(memory_usage)
+    
+    def record_pruning(self, sparsity: float, pruning_ratio: float):
+        """Record pruning-specific metrics."""
+        self.sparsity_history.append(sparsity)
+        self.pruning_ratio_history.append(pruning_ratio)
+    
+    def record_phase_result(self, phase_name: str, results: Dict[str, Any]):
+        """Record results for a specific phase."""
+        self.phase_results[phase_name] = results.copy()
+    
+    def get_latest_accuracy(self) -> Optional[float]:
+        """Get the most recent accuracy."""
+        return self.accuracy_history[-1] if self.accuracy_history else None
+    
+    def get_accuracy_trend(self, window: int = 5) -> str:
+        """Get accuracy trend over recent measurements."""
+        if len(self.accuracy_history) < 2:
+            return "insufficient_data"
+        
+        recent = self.accuracy_history[-min(window, len(self.accuracy_history)):]
+        if len(recent) < 2:
+            return "insufficient_data"
+        
+        trend = recent[-1] - recent[0]
+        if abs(trend) < 0.001:  # Less than 0.1% change
+            return "stable"
+        elif trend > 0:
+            return "improving"
+        else:
+            return "declining"
+    
+    def get_efficiency_summary(self) -> Dict[str, Any]:
+        """Get summary of efficiency metrics."""
+        summary = {}
+        
+        if self.macs_history:
+            summary['macs'] = {
+                'current': self.macs_history[-1],
+                'reduction': (self.macs_history[0] - self.macs_history[-1]) / self.macs_history[0] if len(self.macs_history) > 1 else 0.0
+            }
+        
+        if self.params_history:
+            summary['params'] = {
+                'current': self.params_history[-1],
+                'reduction': (self.params_history[0] - self.params_history[-1]) / self.params_history[0] if len(self.params_history) > 1 else 0.0
+            }
+        
+        if self.inference_time_history:
+            summary['inference_time'] = {
+                'current': self.inference_time_history[-1],
+                'speedup': self.inference_time_history[0] / self.inference_time_history[-1] if len(self.inference_time_history) > 1 and self.inference_time_history[-1] > 0 else 1.0
+            }
+        
+        return summary
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert metrics to dictionary for serialization."""
+        return {
+            'accuracy_history': self.accuracy_history,
+            'top5_accuracy_history': self.top5_accuracy_history,
+            'loss_history': self.loss_history,
+            'macs_history': self.macs_history,
+            'params_history': self.params_history,
+            'inference_time_history': self.inference_time_history,
+            'memory_usage_history': self.memory_usage_history,
+            'sparsity_history': self.sparsity_history,
+            'pruning_ratio_history': self.pruning_ratio_history,
+            'phase_results': self.phase_results,
+            'timestamps': self.timestamps
+        }
+
 def compute_macs(model: nn.Module, input_shape: Tuple[int, ...] = (1, 3, 224, 224)) -> int:
     """
     Compute the number of Multiply-Accumulate operations (MACs) for a model.
