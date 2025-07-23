@@ -1,0 +1,885 @@
+#!/usr/bin/env python3
+"""
+Fine-tuning Agent for Multi-Agent LLM Pruning Framework
+
+This agent handles the fine-tuning of pruned models to recover accuracy
+and optimize performance after structured pruning.
+"""
+
+import logging
+from typing import Dict, Any, Optional, List, Tuple
+import json
+from datetime import datetime
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+
+from .base_agent import BaseAgent
+from ..core.state_manager import PruningState
+from ..utils.profiler import TimingProfiler
+from ..utils.metrics import AccuracyTracker
+
+logger = logging.getLogger(__name__)
+
+class FinetuningAgent(BaseAgent):
+    """
+    Fine-tuning Agent that recovers accuracy of pruned models through
+    strategic fine-tuning with adaptive learning rates and early stopping.
+    """
+    
+    def __init__(self, llm_client=None, profiler: Optional[TimingProfiler] = None):
+        super().__init__("FinetuningAgent", llm_client, profiler)
+        
+        # Fine-tuning components
+        self.optimizer: Optional[optim.Optimizer] = None
+        self.scheduler: Optional[optim.lr_scheduler._LRScheduler] = None
+        self.accuracy_tracker: Optional[AccuracyTracker] = None
+        
+        # Fine-tuning results
+        self.finetuning_results = {}
+        self.training_history = []
+        
+        logger.info("🎯 Fine-tuning Agent initialized")
+    
+    def execute(self, state: PruningState) -> Dict[str, Any]:
+        """
+        Execute fine-tuning phase: recover accuracy of pruned model.
+        
+        Args:
+            state: Current pruning state with pruned model
+            
+        Returns:
+            Dictionary with fine-tuning results and fine-tuned model
+        """
+        
+        with self.profiler.timer("finetuning_agent_execution"):
+            logger.info("🎯 Starting Fine-tuning Agent execution")
+            
+            try:
+                # Validate input state
+                if not self._validate_input_state(state):
+                    return self._create_error_result("Invalid input state for fine-tuning")
+                
+                # Initialize fine-tuning components
+                self._initialize_finetuning_components(state)
+                
+                # Execute fine-tuning pipeline
+                finetuning_results = self._execute_finetuning_pipeline(state)
+                
+                # Validate fine-tuned model
+                validation_results = self._validate_finetuned_model(state, finetuning_results)
+                
+                # Get LLM analysis of fine-tuning results
+                llm_analysis = self._get_llm_analysis(state, finetuning_results, validation_results)
+                
+                # Combine results
+                final_results = {
+                    'success': True,
+                    'agent_name': self.agent_name,
+                    'timestamp': datetime.now().isoformat(),
+                    'finetuning_results': finetuning_results,
+                    'validation_results': validation_results,
+                    'llm_analysis': llm_analysis,
+                    'next_agent': 'EvaluationAgent'
+                }
+                
+                # Update state with fine-tuned model
+                state.model = finetuning_results['finetuned_model']
+                state.finetuning_results = finetuning_results
+                
+                # Store results
+                self.finetuning_results = finetuning_results
+                
+                logger.info("✅ Fine-tuning Agent execution completed successfully")
+                return final_results
+                
+            except Exception as e:
+                logger.error(f"❌ Fine-tuning Agent execution failed: {str(e)}")
+                return self._create_error_result(f"Fine-tuning execution failed: {str(e)}")
+    
+    def _validate_input_state(self, state: PruningState) -> bool:
+        """Validate that the input state contains required pruning results."""
+        
+        required_fields = ['model', 'pruning_results']
+        
+        for field in required_fields:
+            if not hasattr(state, field) or getattr(state, field) is None:
+                logger.error(f"❌ Missing required field in state: {field}")
+                return False
+        
+        # Check if model is pruned
+        if not hasattr(state, 'pruning_results') or not state.pruning_results:
+            logger.error("❌ No pruning results found - model may not be pruned")
+            return False
+        
+        # Check for training data
+        if not hasattr(state, 'train_dataloader') or state.train_dataloader is None:
+            logger.warning("⚠️ No training dataloader found - fine-tuning may be limited")
+        
+        logger.info("✅ Input state validation passed")
+        return True
+    
+    def _initialize_finetuning_components(self, state: PruningState):
+        """Initialize optimizer, scheduler, and accuracy tracker."""
+        
+        with self.profiler.timer("finetuning_components_initialization"):
+            model = state.model
+            
+            # Initialize accuracy tracker
+            self.accuracy_tracker = AccuracyTracker(track_top5=True)
+            
+            # Get fine-tuning configuration
+            finetuning_config = self._get_finetuning_config(state)
+            
+            # Initialize optimizer
+            self.optimizer = self._create_optimizer(model, finetuning_config)
+            
+            # Initialize learning rate scheduler
+            self.scheduler = self._create_scheduler(self.optimizer, finetuning_config)
+            
+            logger.info("🔧 Fine-tuning components initialized successfully")
+    
+    def _get_finetuning_config(self, state: PruningState) -> Dict[str, Any]:
+        """Get fine-tuning configuration based on model and pruning results."""
+        
+        # Get pruning information
+        pruning_results = state.pruning_results
+        achieved_ratio = pruning_results.get('achieved_pruning_ratio', 0.0)
+        
+        # Base configuration
+        base_config = {
+            'learning_rate': 1e-4,
+            'weight_decay': 1e-4,
+            'epochs': 10,
+            'warmup_epochs': 2,
+            'patience': 3,
+            'min_lr': 1e-6
+        }
+        
+        # Adjust based on pruning ratio
+        if achieved_ratio > 0.5:  # Heavy pruning
+            base_config.update({
+                'learning_rate': 5e-5,  # Lower LR for stability
+                'epochs': 20,           # More epochs needed
+                'warmup_epochs': 5,     # Longer warmup
+                'patience': 5           # More patience
+            })
+        elif achieved_ratio > 0.3:  # Moderate pruning
+            base_config.update({
+                'learning_rate': 1e-4,
+                'epochs': 15,
+                'warmup_epochs': 3,
+                'patience': 4
+            })
+        
+        # Adjust based on model type
+        model_name = getattr(state, 'model_name', '').lower()
+        if 'vit' in model_name or 'deit' in model_name:
+            # Vision transformers need different settings
+            base_config.update({
+                'learning_rate': base_config['learning_rate'] * 0.5,  # Lower LR for ViTs
+                'weight_decay': 0.05,  # Higher weight decay
+                'warmup_epochs': base_config['warmup_epochs'] + 1
+            })
+        
+        logger.info(f"📋 Fine-tuning config: LR={base_config['learning_rate']}, Epochs={base_config['epochs']}")
+        return base_config
+    
+    def _create_optimizer(self, model: nn.Module, config: Dict[str, Any]) -> optim.Optimizer:
+        """Create optimizer for fine-tuning."""
+        
+        # Separate parameters for different learning rates
+        no_decay = ['bias', 'LayerNorm.weight', 'norm.weight']
+        
+        optimizer_grouped_parameters = [
+            {
+                'params': [p for n, p in model.named_parameters() 
+                          if not any(nd in n for nd in no_decay) and p.requires_grad],
+                'weight_decay': config['weight_decay']
+            },
+            {
+                'params': [p for n, p in model.named_parameters() 
+                          if any(nd in n for nd in no_decay) and p.requires_grad],
+                'weight_decay': 0.0
+            }
+        ]
+        
+        # Use AdamW optimizer
+        optimizer = optim.AdamW(
+            optimizer_grouped_parameters,
+            lr=config['learning_rate'],
+            betas=(0.9, 0.999),
+            eps=1e-8
+        )
+        
+        logger.info(f"🔧 Created AdamW optimizer with LR={config['learning_rate']}")
+        return optimizer
+    
+    def _create_scheduler(self, optimizer: optim.Optimizer, 
+                         config: Dict[str, Any]) -> optim.lr_scheduler._LRScheduler:
+        """Create learning rate scheduler."""
+        
+        # Use cosine annealing with warmup
+        total_steps = config['epochs']
+        warmup_steps = config['warmup_epochs']
+        
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                # Linear warmup
+                return float(current_step) / float(max(1, warmup_steps))
+            else:
+                # Cosine annealing
+                progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+                return max(0.0, 0.5 * (1.0 + torch.cos(torch.pi * progress)))
+        
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        
+        logger.info(f"🔧 Created cosine scheduler with {warmup_steps} warmup epochs")
+        return scheduler
+    
+    def _execute_finetuning_pipeline(self, state: PruningState) -> Dict[str, Any]:
+        """Execute the complete fine-tuning pipeline."""
+        
+        with self.profiler.timer("finetuning_pipeline_execution"):
+            logger.info("🔄 Executing fine-tuning pipeline")
+            
+            # Get configuration
+            finetuning_config = self._get_finetuning_config(state)
+            
+            # Phase 1: Baseline evaluation
+            baseline_results = self._evaluate_baseline_performance(state)
+            
+            # Phase 2: Fine-tuning execution
+            training_results = self._execute_training_loop(state, finetuning_config)
+            
+            # Phase 3: Final evaluation
+            final_evaluation = self._evaluate_final_performance(state)
+            
+            # Phase 4: Performance analysis
+            performance_analysis = self._analyze_performance_improvement(
+                baseline_results, final_evaluation, training_results
+            )
+            
+            # Combine all results
+            pipeline_results = {
+                'baseline_performance': baseline_results,
+                'training_results': training_results,
+                'final_performance': final_evaluation,
+                'performance_analysis': performance_analysis,
+                'finetuned_model': state.model,
+                'training_history': self.training_history,
+                'config_used': finetuning_config,
+                'pipeline_success': training_results['training_completed']
+            }
+            
+            logger.info("✅ Fine-tuning pipeline execution completed")
+            return pipeline_results
+    
+    def _evaluate_baseline_performance(self, state: PruningState) -> Dict[str, Any]:
+        """Evaluate baseline performance of pruned model before fine-tuning."""
+        
+        with self.profiler.timer("baseline_evaluation"):
+            logger.info("📊 Evaluating baseline performance")
+            
+            model = state.model
+            
+            # Use validation dataloader if available
+            eval_dataloader = getattr(state, 'val_dataloader', None)
+            if eval_dataloader is None:
+                eval_dataloader = getattr(state, 'test_dataloader', None)
+            
+            if eval_dataloader is None:
+                logger.warning("⚠️ No evaluation dataloader available")
+                return {
+                    'accuracy': 0.0,
+                    'loss': float('inf'),
+                    'message': 'No evaluation data available'
+                }
+            
+            # Evaluate model
+            self.accuracy_tracker.reset()
+            baseline_result = self.accuracy_tracker.evaluate_model(
+                model=model,
+                dataloader=eval_dataloader,
+                criterion=nn.CrossEntropyLoss(),
+                max_batches=50  # Limit for efficiency
+            )
+            
+            baseline_performance = {
+                'top1_accuracy': baseline_result.top1_accuracy,
+                'top5_accuracy': baseline_result.top5_accuracy,
+                'loss': baseline_result.loss,
+                'total_samples': baseline_result.total_samples,
+                'inference_time': baseline_result.inference_time
+            }
+            
+            logger.info(f"📊 Baseline performance: {baseline_result.top1_accuracy:.1%} accuracy")
+            return baseline_performance
+    
+    def _execute_training_loop(self, state: PruningState, 
+                             config: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the main training loop."""
+        
+        with self.profiler.timer("training_loop_execution"):
+            logger.info("🏃 Starting training loop")
+            
+            model = state.model
+            train_dataloader = getattr(state, 'train_dataloader', None)
+            val_dataloader = getattr(state, 'val_dataloader', None)
+            
+            if train_dataloader is None:
+                logger.error("❌ No training dataloader available")
+                return {
+                    'training_completed': False,
+                    'error': 'No training data available'
+                }
+            
+            # Training setup
+            model.train()
+            criterion = nn.CrossEntropyLoss()
+            device = next(model.parameters()).device
+            
+            # Training tracking
+            best_accuracy = 0.0
+            best_model_state = None
+            patience_counter = 0
+            epochs_completed = 0
+            
+            self.training_history = []
+            
+            # Training loop
+            for epoch in range(config['epochs']):
+                epoch_start_time = datetime.now()
+                
+                # Training phase
+                train_metrics = self._train_epoch(
+                    model, train_dataloader, criterion, self.optimizer, device
+                )
+                
+                # Validation phase
+                if val_dataloader is not None:
+                    val_metrics = self._validate_epoch(
+                        model, val_dataloader, criterion, device
+                    )
+                else:
+                    val_metrics = {'accuracy': 0.0, 'loss': float('inf')}
+                
+                # Learning rate scheduling
+                self.scheduler.step()
+                current_lr = self.optimizer.param_groups[0]['lr']
+                
+                # Record epoch results
+                epoch_result = {
+                    'epoch': epoch + 1,
+                    'train_loss': train_metrics['loss'],
+                    'train_accuracy': train_metrics['accuracy'],
+                    'val_loss': val_metrics['loss'],
+                    'val_accuracy': val_metrics['accuracy'],
+                    'learning_rate': current_lr,
+                    'epoch_time': (datetime.now() - epoch_start_time).total_seconds()
+                }
+                
+                self.training_history.append(epoch_result)
+                epochs_completed = epoch + 1
+                
+                # Log progress
+                logger.info(f"Epoch {epoch + 1}/{config['epochs']}: "
+                           f"Train Loss: {train_metrics['loss']:.4f}, "
+                           f"Train Acc: {train_metrics['accuracy']:.1%}, "
+                           f"Val Acc: {val_metrics['accuracy']:.1%}, "
+                           f"LR: {current_lr:.2e}")
+                
+                # Early stopping check
+                if val_metrics['accuracy'] > best_accuracy:
+                    best_accuracy = val_metrics['accuracy']
+                    best_model_state = model.state_dict().copy()
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                
+                if patience_counter >= config['patience']:
+                    logger.info(f"🛑 Early stopping triggered after {epoch + 1} epochs")
+                    break
+                
+                # Minimum learning rate check
+                if current_lr < config['min_lr']:
+                    logger.info(f"🛑 Minimum learning rate reached: {current_lr:.2e}")
+                    break
+            
+            # Restore best model
+            if best_model_state is not None:
+                model.load_state_dict(best_model_state)
+                logger.info(f"✅ Restored best model with {best_accuracy:.1%} accuracy")
+            
+            training_results = {
+                'training_completed': True,
+                'epochs_completed': epochs_completed,
+                'best_accuracy': best_accuracy,
+                'final_learning_rate': current_lr,
+                'early_stopping_triggered': patience_counter >= config['patience'],
+                'total_training_time': sum(h['epoch_time'] for h in self.training_history)
+            }
+            
+            logger.info("✅ Training loop completed successfully")
+            return training_results
+    
+    def _train_epoch(self, model: nn.Module, dataloader: DataLoader, 
+                    criterion: nn.Module, optimizer: optim.Optimizer, 
+                    device: torch.device) -> Dict[str, float]:
+        """Train for one epoch."""
+        
+        model.train()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        
+        for batch_idx, (data, target) in enumerate(dataloader):
+            data, target = data.to(device), target.to(device)
+            
+            # Forward pass
+            optimizer.zero_grad()
+            output = model(data)
+            loss = criterion(output, target)
+            
+            # Backward pass
+            loss.backward()
+            
+            # Gradient clipping for stability
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+            
+            # Statistics
+            total_loss += loss.item()
+            pred = output.argmax(dim=1, keepdim=True)
+            correct += pred.eq(target.view_as(pred)).sum().item()
+            total += target.size(0)
+            
+            # Limit batches for efficiency during fine-tuning
+            if batch_idx >= 100:  # Process max 100 batches per epoch
+                break
+        
+        return {
+            'loss': total_loss / (batch_idx + 1),
+            'accuracy': correct / total if total > 0 else 0.0
+        }
+    
+    def _validate_epoch(self, model: nn.Module, dataloader: DataLoader,
+                       criterion: nn.Module, device: torch.device) -> Dict[str, float]:
+        """Validate for one epoch."""
+        
+        model.eval()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for batch_idx, (data, target) in enumerate(dataloader):
+                data, target = data.to(device), target.to(device)
+                
+                output = model(data)
+                loss = criterion(output, target)
+                
+                total_loss += loss.item()
+                pred = output.argmax(dim=1, keepdim=True)
+                correct += pred.eq(target.view_as(pred)).sum().item()
+                total += target.size(0)
+                
+                # Limit batches for efficiency
+                if batch_idx >= 50:  # Process max 50 batches for validation
+                    break
+        
+        return {
+            'loss': total_loss / (batch_idx + 1),
+            'accuracy': correct / total if total > 0 else 0.0
+        }
+    
+    def _evaluate_final_performance(self, state: PruningState) -> Dict[str, Any]:
+        """Evaluate final performance after fine-tuning."""
+        
+        with self.profiler.timer("final_evaluation"):
+            logger.info("📊 Evaluating final performance")
+            
+            model = state.model
+            
+            # Use validation dataloader if available
+            eval_dataloader = getattr(state, 'val_dataloader', None)
+            if eval_dataloader is None:
+                eval_dataloader = getattr(state, 'test_dataloader', None)
+            
+            if eval_dataloader is None:
+                logger.warning("⚠️ No evaluation dataloader available")
+                return {
+                    'accuracy': 0.0,
+                    'loss': float('inf'),
+                    'message': 'No evaluation data available'
+                }
+            
+            # Evaluate model
+            self.accuracy_tracker.reset()
+            final_result = self.accuracy_tracker.evaluate_model(
+                model=model,
+                dataloader=eval_dataloader,
+                criterion=nn.CrossEntropyLoss(),
+                max_batches=100  # More thorough evaluation
+            )
+            
+            final_performance = {
+                'top1_accuracy': final_result.top1_accuracy,
+                'top5_accuracy': final_result.top5_accuracy,
+                'loss': final_result.loss,
+                'total_samples': final_result.total_samples,
+                'inference_time': final_result.inference_time
+            }
+            
+            logger.info(f"📊 Final performance: {final_result.top1_accuracy:.1%} accuracy")
+            return final_performance
+    
+    def _analyze_performance_improvement(self, baseline: Dict[str, Any],
+                                       final: Dict[str, Any],
+                                       training: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze performance improvement from fine-tuning."""
+        
+        # Calculate improvements
+        accuracy_improvement = final['top1_accuracy'] - baseline['top1_accuracy']
+        loss_improvement = baseline['loss'] - final['loss']
+        
+        # Analyze training efficiency
+        epochs_used = training['epochs_completed']
+        training_time = training['total_training_time']
+        
+        # Calculate recovery metrics
+        pruning_results = getattr(self, 'pruning_results', {})
+        achieved_ratio = pruning_results.get('achieved_pruning_ratio', 0.0)
+        
+        analysis = {
+            'accuracy_improvement': accuracy_improvement,
+            'accuracy_improvement_percent': accuracy_improvement * 100,
+            'loss_improvement': loss_improvement,
+            'relative_accuracy_recovery': accuracy_improvement / achieved_ratio if achieved_ratio > 0 else 0.0,
+            'training_efficiency': {
+                'epochs_used': epochs_used,
+                'training_time_minutes': training_time / 60,
+                'accuracy_per_epoch': accuracy_improvement / epochs_used if epochs_used > 0 else 0.0,
+                'early_stopping_used': training['early_stopping_triggered']
+            },
+            'overall_assessment': self._assess_finetuning_success(
+                accuracy_improvement, achieved_ratio, epochs_used
+            )
+        }
+        
+        logger.info(f"📈 Performance analysis: {accuracy_improvement:+.1%} accuracy improvement")
+        return analysis
+    
+    def _assess_finetuning_success(self, accuracy_improvement: float,
+                                 pruning_ratio: float, epochs_used: int) -> str:
+        """Assess overall success of fine-tuning."""
+        
+        # Define success criteria
+        if accuracy_improvement > 0.05:  # >5% improvement
+            return 'excellent'
+        elif accuracy_improvement > 0.02:  # >2% improvement
+            return 'good'
+        elif accuracy_improvement > 0.0:   # Any improvement
+            return 'moderate'
+        elif accuracy_improvement > -0.02: # <2% degradation
+            return 'acceptable'
+        else:
+            return 'poor'
+    
+    def _validate_finetuned_model(self, state: PruningState,
+                                finetuning_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate the fine-tuned model."""
+        
+        with self.profiler.timer("finetuned_model_validation"):
+            logger.info("🔍 Validating fine-tuned model")
+            
+            model = state.model
+            
+            validation_tests = {
+                'forward_pass_test': self._test_forward_pass(model),
+                'gradient_flow_test': self._test_gradient_flow(model),
+                'performance_regression_test': self._test_performance_regression(finetuning_results),
+                'stability_test': self._test_model_stability(model),
+                'memory_efficiency_test': self._test_memory_efficiency(model)
+            }
+            
+            # Overall validation status
+            all_tests_passed = all(test['passed'] for test in validation_tests.values())
+            
+            validation_summary = {
+                'model_is_valid': all_tests_passed,
+                'validation_tests': validation_tests,
+                'failed_tests': [
+                    test_name for test_name, result in validation_tests.items()
+                    if not result['passed']
+                ],
+                'validation_score': sum(1 for test in validation_tests.values() if test['passed']) / len(validation_tests)
+            }
+            
+            if all_tests_passed:
+                logger.info("✅ Fine-tuned model validation passed all tests")
+            else:
+                logger.warning(f"⚠️ Fine-tuned model validation failed {len(validation_summary['failed_tests'])} tests")
+            
+            return validation_summary
+    
+    def _get_llm_analysis(self, state: PruningState, finetuning_results: Dict[str, Any],
+                         validation_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Get LLM analysis of fine-tuning results."""
+        
+        if not self.llm_client:
+            return {'status': 'llm_not_available', 'message': 'LLM client not configured'}
+        
+        # Create prompt for LLM analysis
+        prompt = self._create_llm_analysis_prompt(state, finetuning_results, validation_results)
+        
+        try:
+            with self.profiler.timer("llm_analysis"):
+                response = self.llm_client.generate(prompt)
+                
+                # Parse LLM response
+                llm_analysis = self._parse_llm_analysis_response(response)
+                
+                logger.info("🤖 LLM analysis completed successfully")
+                return llm_analysis
+                
+        except Exception as e:
+            logger.warning(f"⚠️ LLM analysis failed: {str(e)}")
+            return {
+                'status': 'llm_analysis_failed',
+                'error': str(e),
+                'fallback_used': True
+            }
+    
+    # Helper methods for validation tests
+    def _test_forward_pass(self, model: nn.Module) -> Dict[str, Any]:
+        """Test if the model can perform forward pass."""
+        
+        try:
+            model.eval()
+            device = next(model.parameters()).device
+            dummy_input = torch.randn(1, 3, 224, 224).to(device)
+            
+            with torch.no_grad():
+                output = model(dummy_input)
+            
+            return {
+                'passed': True,
+                'output_shape': list(output.shape),
+                'message': 'Forward pass successful'
+            }
+            
+        except Exception as e:
+            return {
+                'passed': False,
+                'error': str(e),
+                'message': 'Forward pass failed'
+            }
+    
+    def _test_gradient_flow(self, model: nn.Module) -> Dict[str, Any]:
+        """Test if gradients can flow through the model."""
+        
+        try:
+            model.train()
+            device = next(model.parameters()).device
+            dummy_input = torch.randn(1, 3, 224, 224).to(device)
+            dummy_target = torch.randint(0, 1000, (1,)).to(device)
+            
+            # Forward pass
+            output = model(dummy_input)
+            loss = nn.CrossEntropyLoss()(output, dummy_target)
+            
+            # Backward pass
+            loss.backward()
+            
+            # Check if gradients exist
+            has_gradients = any(p.grad is not None for p in model.parameters() if p.requires_grad)
+            
+            return {
+                'passed': has_gradients,
+                'message': 'Gradient flow test successful' if has_gradients else 'No gradients found'
+            }
+            
+        except Exception as e:
+            return {
+                'passed': False,
+                'error': str(e),
+                'message': 'Gradient flow test failed'
+            }
+    
+    def _test_performance_regression(self, finetuning_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Test for performance regression."""
+        
+        try:
+            performance_analysis = finetuning_results['performance_analysis']
+            accuracy_improvement = performance_analysis['accuracy_improvement']
+            
+            # Check if there's significant regression
+            significant_regression = accuracy_improvement < -0.05  # >5% drop
+            
+            return {
+                'passed': not significant_regression,
+                'accuracy_change': accuracy_improvement,
+                'message': 'No significant regression' if not significant_regression else f'Significant regression: {accuracy_improvement:.1%}'
+            }
+            
+        except Exception as e:
+            return {
+                'passed': False,
+                'error': str(e),
+                'message': 'Performance regression test failed'
+            }
+    
+    def _test_model_stability(self, model: nn.Module) -> Dict[str, Any]:
+        """Test model stability with multiple forward passes."""
+        
+        try:
+            model.eval()
+            device = next(model.parameters()).device
+            dummy_input = torch.randn(1, 3, 224, 224).to(device)
+            
+            outputs = []
+            with torch.no_grad():
+                for _ in range(5):
+                    output = model(dummy_input)
+                    outputs.append(output.cpu())
+            
+            # Check consistency
+            max_diff = max(torch.max(torch.abs(outputs[i] - outputs[0])).item() 
+                          for i in range(1, len(outputs)))
+            
+            is_stable = max_diff < 1e-6  # Very small differences expected
+            
+            return {
+                'passed': is_stable,
+                'max_difference': max_diff,
+                'message': 'Model is stable' if is_stable else f'Model instability detected: {max_diff}'
+            }
+            
+        except Exception as e:
+            return {
+                'passed': False,
+                'error': str(e),
+                'message': 'Stability test failed'
+            }
+    
+    def _test_memory_efficiency(self, model: nn.Module) -> Dict[str, Any]:
+        """Test memory efficiency of the fine-tuned model."""
+        
+        try:
+            # Get model size
+            model_size_mb = sum(p.numel() * p.element_size() for p in model.parameters()) / (1024 * 1024)
+            
+            # Test memory usage during inference
+            if torch.cuda.is_available():
+                device = torch.device('cuda')
+                model_copy = type(model)()
+                model_copy.load_state_dict(model.state_dict())
+                model_copy.to(device)
+                
+                # Measure memory usage
+                torch.cuda.empty_cache()
+                initial_memory = torch.cuda.memory_allocated()
+                
+                dummy_input = torch.randn(8, 3, 224, 224).to(device)  # Batch of 8
+                with torch.no_grad():
+                    _ = model_copy(dummy_input)
+                
+                peak_memory = torch.cuda.memory_allocated()
+                memory_used_mb = (peak_memory - initial_memory) / (1024 * 1024)
+                
+                return {
+                    'passed': True,
+                    'model_size_mb': model_size_mb,
+                    'inference_memory_mb': memory_used_mb,
+                    'message': 'Memory efficiency test passed'
+                }
+            else:
+                return {
+                    'passed': True,
+                    'model_size_mb': model_size_mb,
+                    'message': 'Memory efficiency test passed (CPU only)'
+                }
+                
+        except Exception as e:
+            return {
+                'passed': False,
+                'error': str(e),
+                'message': 'Memory efficiency test failed'
+            }
+    
+    def _create_llm_analysis_prompt(self, state: PruningState, finetuning_results: Dict[str, Any],
+                                  validation_results: Dict[str, Any]) -> str:
+        """Create prompt for LLM analysis."""
+        
+        model_name = getattr(state, 'model_name', 'unknown')
+        performance_analysis = finetuning_results['performance_analysis']
+        
+        prompt = f"""
+You are an expert in neural network fine-tuning. Please analyze the following fine-tuning results:
+
+## Model Information:
+- Model: {model_name}
+- Pruning Ratio: {getattr(state, 'target_pruning_ratio', 0.0):.1%}
+
+## Fine-tuning Results:
+{json.dumps(finetuning_results, indent=2, default=str)}
+
+## Validation Results:
+{json.dumps(validation_results, indent=2, default=str)}
+
+Please provide analysis in JSON format:
+{{
+  "overall_assessment": "excellent|good|moderate|acceptable|poor",
+  "key_insights": [list of key insights],
+  "concerns": [list of concerns],
+  "recommendations": [list of recommendations],
+  "confidence_score": float between 0 and 1
+}}
+"""
+        
+        return prompt
+    
+    def _parse_llm_analysis_response(self, response: str) -> Dict[str, Any]:
+        """Parse LLM analysis response."""
+        
+        try:
+            import re
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            
+            if json_match:
+                json_str = json_match.group()
+                llm_analysis = json.loads(json_str)
+                
+                return {
+                    'status': 'success',
+                    'analysis': llm_analysis,
+                    'raw_response': response
+                }
+            else:
+                return {
+                    'status': 'parsing_failed',
+                    'message': 'Could not extract JSON from LLM response',
+                    'raw_response': response
+                }
+                
+        except json.JSONDecodeError as e:
+            return {
+                'status': 'json_parsing_failed',
+                'error': str(e),
+                'raw_response': response
+            }
+    
+    def _create_error_result(self, error_message: str) -> Dict[str, Any]:
+        """Create standardized error result."""
+        
+        return {
+            'success': False,
+            'agent_name': self.agent_name,
+            'timestamp': datetime.now().isoformat(),
+            'error': error_message,
+            'next_agent': None
+        }
+
