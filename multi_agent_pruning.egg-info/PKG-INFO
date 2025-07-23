@@ -146,7 +146,7 @@ A state-of-the-art neural network pruning framework that leverages multi-agent L
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/multi-agent-pruning.git
+git clone https://github.com/BanisharifM/multi-agent-pruning.git
 cd multi-agent-pruning
 
 # Run automated setup (recommended for HPC systems)

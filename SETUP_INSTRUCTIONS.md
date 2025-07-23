@@ -8,7 +8,7 @@ For immediate setup on HPC systems with SLURM:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/multi-agent-pruning.git
+git clone https://github.com/BanisharifM/multi-agent-pruning.git
 cd multi-agent-pruning
 
 # 2. Run automated setup
@@ -76,7 +76,7 @@ The script will:
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/your-username/multi-agent-pruning.git
+git clone https://github.com/BanisharifM/multi-agent-pruning.git
 cd multi-agent-pruning
 
 # 2. Load HPC modules (adjust for your system)

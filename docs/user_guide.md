@@ -31,7 +31,7 @@ Before using the framework, ensure you have:
 For HPC systems with SLURM, use our automated setup script:
 
 ```bash
-git clone https://github.com/your-username/multi-agent-pruning.git
+git clone https://github.com/BanisharifM/multi-agent-pruning.git
 cd multi-agent-pruning
 chmod +x tools/setup_hpc.sh
 ./tools/setup_hpc.sh
@@ -51,7 +51,7 @@ For local development or custom environments:
 
 ```bash
 # Clone repository
-git clone https://github.com/your-username/multi-agent-pruning.git
+git clone https://github.com/BanisharifM/multi-agent-pruning.git
 cd multi-agent-pruning
 
 # Create environment
