@@ -1,0 +1,6 @@
+[console_scripts]
+multi-agent-compare = multi_agent_pruning.scripts.compare_baselines:main
+multi-agent-evaluate = multi_agent_pruning.scripts.evaluate:main
+multi-agent-prune = multi_agent_pruning.scripts.prune:main
+multi-agent-setup = multi_agent_pruning.scripts.setup_models:main
+multi-agent-train = multi_agent_pruning.scripts.train:main

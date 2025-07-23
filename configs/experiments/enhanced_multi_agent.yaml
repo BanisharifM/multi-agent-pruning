@@ -1,0 +1,423 @@
+# Enhanced Multi-Agent LLM Pruning Configuration
+# Optimized version of the user's approach with precomputation and improvements
+
+# Experiment Configuration
+experiment:
+  name: "enhanced_multi_agent_pruning"
+  description: "Improved multi-agent LLM pruning with precomputation and optimizations"
+  version: "2.0"
+  
+  # Reproducibility
+  seed: 42
+  deterministic: true
+  
+  # Experiment tracking
+  wandb:
+    enabled: true
+    project: "multi_agent_pruning_enhanced"
+    entity: null
+    tags: ["multi-agent", "llm-guided", "pruning", "enhanced"]
+
+# Dataset Configuration
+datasets:
+  imagenet:
+    path: "/path/to/imagenet"
+    num_classes: 1000
+    input_size: 224
+    batch_size: 256
+    num_workers: 16
+    pin_memory: true
+    
+    # Dataset-specific safety limits
+    safety_limits:
+      max_mlp_pruning: 0.15      # Very conservative for ImageNet
+      max_attention_pruning: 0.10
+      max_overall_pruning: 0.60
+      min_accuracy_threshold: 0.40
+    
+    # Evaluation settings
+    evaluation:
+      metrics: ["top1_accuracy", "top5_accuracy"]
+      batch_size: 128
+      num_workers: 8
+  
+  cifar10:
+    path: "/path/to/cifar10"
+    num_classes: 10
+    input_size: 32
+    batch_size: 512
+    num_workers: 8
+    pin_memory: true
+    
+    # More aggressive limits for CIFAR-10
+    safety_limits:
+      max_mlp_pruning: 0.70
+      max_attention_pruning: 0.60
+      max_overall_pruning: 0.90
+      min_accuracy_threshold: 0.70
+    
+    evaluation:
+      metrics: ["accuracy"]
+      batch_size: 256
+      num_workers: 4
+
+# Model Configuration
+models:
+  # Vision Transformers
+  deit_small:
+    name: "deit_small_patch16_224.fb_in1k"
+    architecture_type: "vision_transformer"
+    pretrained: true
+    
+    # Architecture-specific settings
+    pruning_strategy: "attention_mlp"
+    sensitive_layers: ["patch_embed", "head", "pos_embed"]
+    
+    # Recommended parameters
+    recommended:
+      importance_criterion: "taylor"
+      round_to: 2
+      initial_ratio: 0.3
+  
+  deit_base:
+    name: "deit_base_patch16_224.fb_in1k"
+    architecture_type: "vision_transformer"
+    pretrained: true
+    pruning_strategy: "attention_mlp"
+    sensitive_layers: ["patch_embed", "head", "pos_embed"]
+    recommended:
+      importance_criterion: "taylor"
+      round_to: 2
+      initial_ratio: 0.25
+  
+  # CNNs
+  resnet50:
+    name: "resnet50.tv_in1k"
+    architecture_type: "cnn"
+    pretrained: true
+    pruning_strategy: "structured_channels"
+    sensitive_layers: ["conv1", "fc"]
+    recommended:
+      importance_criterion: "l1norm"
+      round_to: 4
+      initial_ratio: 0.4
+  
+  convnext_small:
+    name: "convnext_small.fb_in1k"
+    architecture_type: "modern_cnn"
+    pretrained: true
+    pruning_strategy: "structured_channels"
+    sensitive_layers: ["stem", "head"]
+    recommended:
+      importance_criterion: "taylor"
+      round_to: 4
+      initial_ratio: 0.35
+
+# Multi-Agent System Configuration
+agents:
+  # Global agent settings
+  global:
+    llm_model: "gpt-4o-mini"
+    temperature: 0.1
+    max_tokens: 2000
+    max_retries: 3
+    enable_safety_checks: true
+    safety_multiplier: 0.8
+    save_reasoning_traces: true
+  
+  # Profiling Agent
+  profiling_agent:
+    enable_caching: true
+    cache_duration: 3600  # 1 hour
+    precompute_dependencies: true
+    precompute_importance: true
+    
+    # Analysis settings
+    dependency_analysis:
+      enabled: true
+      coupling_detection: true
+      isomorphic_grouping: true
+    
+    performance_analysis:
+      memory_profiling: true
+      timing_estimation: true
+      hardware_optimization: true
+  
+  # Master Agent  
+  master_agent:
+    max_iterations: 5
+    convergence_threshold: 0.005  # 0.5% accuracy improvement
+    target_tolerance: 0.01        # 1% parameter reduction tolerance
+    
+    # Strategy optimization
+    exploration_strategies: ["conservative", "moderate", "aggressive"]
+    adaptive_strategy: true
+    
+    # History analysis
+    history_analysis:
+      enabled: true
+      pattern_detection: true
+      convergence_detection: true
+      cycling_detection: true
+  
+  # Analysis Agent
+  analysis_agent:
+    architecture_specific: true
+    safety_enforcement: "strict"
+    
+    # Parameter optimization
+    parameter_search:
+      importance_criteria: ["taylor", "l1norm", "l2norm"]
+      round_to_options: [1, 2, 4, 8]
+      ratio_exploration: "adaptive"
+  
+  # Pruning Agent
+  pruning_agent:
+    backend: "torch_pruning"
+    global_pruning: true
+    
+    # Pruning execution
+    validation_steps: true
+    dimension_checking: true
+    gradient_checkpointing: true
+    
+    # Performance optimization
+    batch_processing: true
+    memory_efficient: true
+  
+  # Fine-tuning Agent
+  finetuning_agent:
+    # Training settings
+    optimizer: "adamw"
+    scheduler: "cosine"
+    warmup_epochs: 1
+    
+    # Dataset-specific settings
+    imagenet:
+      epochs: 5
+      learning_rate: 0.001
+      weight_decay: 0.05
+      batch_size: 256
+    
+    cifar10:
+      epochs: 3
+      learning_rate: 0.01
+      weight_decay: 0.0001
+      batch_size: 512
+    
+    # Early stopping
+    early_stopping:
+      enabled: true
+      patience: 2
+      min_delta: 0.001
+  
+  # Evaluation Agent
+  evaluation_agent:
+    comprehensive_metrics: true
+    
+    # Metrics to compute
+    metrics:
+      accuracy: true
+      parameter_reduction: true
+      macs_reduction: true
+      memory_usage: true
+      inference_time: true
+      
+    # Hardware benchmarking
+    hardware_benchmark:
+      enabled: true
+      devices: ["cpu", "cuda"]
+      batch_sizes: [1, 8, 32]
+
+# Precomputation Configuration
+precomputation:
+  enabled: true
+  cache_dir: "./cache"
+  
+  # What to precompute
+  model_analysis:
+    enabled: true
+    architecture_detection: true
+    layer_analysis: true
+    dependency_graph: true
+    isomorphic_groups: true
+  
+  importance_scores:
+    enabled: true
+    criteria: ["taylor", "l1norm", "l2norm", "random"]
+    cache_duration: 7200  # 2 hours
+  
+  dataset_statistics:
+    enabled: true
+    class_distribution: true
+    data_statistics: true
+    cache_duration: 86400  # 24 hours
+  
+  # Performance profiling
+  performance_profiling:
+    enabled: true
+    memory_usage: true
+    inference_timing: true
+    hardware_optimization: true
+
+# Baseline Comparison Configuration
+baseline_comparison:
+  enabled: true
+  
+  # Methods to compare against
+  methods:
+    magnitude_l1:
+      enabled: true
+      description: "L1 magnitude-based pruning"
+    
+    magnitude_l2:
+      enabled: true
+      description: "L2 magnitude-based pruning"
+    
+    taylor:
+      enabled: true
+      description: "Taylor expansion importance pruning"
+    
+    random:
+      enabled: true
+      description: "Random pruning baseline"
+    
+    structured:
+      enabled: true
+      description: "Traditional structured pruning"
+    
+    isomorphic_original:
+      enabled: true
+      description: "Original isomorphic pruning method"
+    
+    multi_agent_llm:
+      enabled: true
+      description: "Our enhanced multi-agent LLM method"
+  
+  # Comparison settings
+  evaluation:
+    num_runs: 3
+    statistical_significance: true
+    confidence_interval: 0.95
+  
+  # Target configurations for paper reproduction
+  paper_targets:
+    deit_targets:
+      - {model: "deit_base", target_macs_g: 4.16, target_accuracy: 82.41}
+      - {model: "deit_base", target_macs_g: 2.61, target_accuracy: 81.13}
+      - {model: "deit_base", target_macs_g: 1.21, target_accuracy: 77.50}
+    
+    convnext_targets:
+      - {model: "convnext_small", target_macs_g: 8.48, target_accuracy: 83.17}
+      - {model: "convnext_tiny", target_macs_g: 4.19, target_accuracy: 82.19}
+
+# Hardware Configuration
+hardware:
+  # GPU settings
+  gpu:
+    device: "cuda"
+    memory_limit: "40GB"  # A100 GPU
+    mixed_precision: true
+    gradient_checkpointing: true
+  
+  # Multi-GPU settings
+  distributed:
+    enabled: false
+    backend: "nccl"
+    world_size: 1
+  
+  # CPU fallback
+  cpu:
+    num_workers: 16
+    memory_limit: "64GB"
+
+# Logging and Monitoring
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # File logging
+  file_logging:
+    enabled: true
+    log_dir: "./logs"
+    max_size: "100MB"
+    backup_count: 5
+  
+  # Console logging
+  console_logging:
+    enabled: true
+    colored: true
+  
+  # Agent-specific logging
+  agent_logging:
+    reasoning_traces: true
+    conversation_history: true
+    timing_profiler: true
+
+# Output Configuration
+output:
+  results_dir: "./results"
+  
+  # What to save
+  save_models: true
+  save_checkpoints: true
+  save_plots: true
+  save_logs: true
+  
+  # Export formats
+  export_formats:
+    csv: true
+    json: true
+    latex: true
+    wandb: true
+  
+  # Visualization
+  visualization:
+    accuracy_plots: true
+    timing_plots: true
+    comparison_tables: true
+    architecture_diagrams: false
+
+# Development and Debugging
+development:
+  debug_mode: false
+  fast_dev_run: false
+  
+  # Testing settings
+  testing:
+    unit_tests: true
+    integration_tests: true
+    performance_tests: true
+  
+  # Profiling
+  profiling:
+    memory_profiling: false
+    performance_profiling: true
+    bottleneck_detection: true
+
+# Model Download Configuration
+model_download:
+  auto_download: true
+  cache_dir: "./models"
+  
+  # HPC integration
+  hpc_setup:
+    enabled: true
+    batch_download: true
+    verification: true
+  
+  # Supported models
+  supported_models:
+    vision_transformers:
+      - "deit_tiny_patch16_224.fb_in1k"
+      - "deit_small_patch16_224.fb_in1k" 
+      - "deit_base_patch16_224.fb_in1k"
+    
+    cnns:
+      - "resnet50.tv_in1k"
+      - "resnet101.tv_in1k"
+      - "resnet152.tv_in1k"
+      - "convnext_tiny.fb_in1k"
+      - "convnext_small.fb_in1k"
+      - "mobilenetv2_100.ra_in1k"
+
