@@ -1,3 +1,4 @@
+LICENSE
 README.md
 setup.py
 multi_agent_pruning/__init__.py
@@ -33,6 +34,8 @@ multi_agent_pruning/models/architecture_detector.py
 multi_agent_pruning/models/architecture_registry.py
 multi_agent_pruning/models/model_factory.py
 multi_agent_pruning/models/model_utils.py
+multi_agent_pruning/scripts/__init__.py
+multi_agent_pruning/scripts/cli.py
 multi_agent_pruning/utils/__init__.py
 multi_agent_pruning/utils/helpers.py
 multi_agent_pruning/utils/logger.py
