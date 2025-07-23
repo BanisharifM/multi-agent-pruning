@@ -11,5 +11,10 @@ multi_agent_pruning.egg-info/requires.txt
 multi_agent_pruning.egg-info/top_level.txt
 multi_agent_pruning/baselines/__init__.py
 multi_agent_pruning/core/__init__.py
+multi_agent_pruning/core/dependency_analyzer.py
+multi_agent_pruning/core/importance_criteria.py
+multi_agent_pruning/core/isomorphic_analyzer.py
+multi_agent_pruning/core/pruning_engine.py
+multi_agent_pruning/core/recovery_engine.py
 multi_agent_pruning/core/state_manager.py
 tests/test_enhanced_system.py
