@@ -874,3 +874,107 @@ Please provide validation in JSON format:
         
         return result
 
+    def get_agent_role(self) -> str:
+        """Return the role of this agent."""
+        return "pruning_agent"
+    
+    def get_system_prompt(self, context: Dict[str, Any]) -> str:
+        """Generate system prompt for the pruning agent."""
+        
+        model_info = context.get('model_info', {})
+        pruning_config = context.get('pruning_config', {})
+        safety_constraints = context.get('safety_constraints', {})
+        
+        prompt = f"""You are an expert Pruning Agent in a multi-agent neural network pruning system.
+
+ROLE: Execute structured pruning operations with safety guarantees and real-time monitoring.
+
+CURRENT CONTEXT:
+- Model: {model_info.get('name', 'Unknown')} ({model_info.get('total_params', 0):,} parameters)
+- Architecture: {model_info.get('architecture_type', 'Unknown')}
+- Target: {pruning_config.get('target_ratio', 0.5)*100:.1f}% compression
+- Method: {pruning_config.get('method', 'structured')} pruning
+
+SAFETY CONSTRAINTS:
+- Max MLP pruning: {safety_constraints.get('max_mlp_ratio', 0.15)*100:.1f}%
+- Max Attention pruning: {safety_constraints.get('max_attention_ratio', 0.10)*100:.1f}%
+- Min accuracy threshold: {safety_constraints.get('min_accuracy', 0.70)*100:.1f}%
+
+RESPONSIBILITIES:
+1. Execute coordinated pruning for coupled layers (MLP fc1↔fc2, Attention qkv↔proj)
+2. Apply importance-guided selection with safety validation
+3. Monitor accuracy degradation and trigger rollback if needed
+4. Maintain detailed statistics and progress tracking
+5. Ensure architectural constraints are preserved
+
+DECISION FRAMEWORK:
+- SAFETY FIRST: Always validate constraints before pruning
+- COORDINATED: Prune coupled layers together to maintain dimensions
+- MONITORED: Track accuracy after each major pruning step
+- RECOVERABLE: Maintain checkpoints for rollback capability
+
+Respond with structured decisions including rationale, safety validation, and execution plan."""
+        
+        return prompt
+    
+    def parse_llm_response(self, response: str, context: Dict[str, Any]) -> AgentResponse:
+        """Parse LLM response for pruning decisions."""
+        
+        try:
+            # Extract key decisions from response
+            decisions = {}
+            
+            # Look for pruning ratios
+            import re
+            
+            # Extract MLP pruning ratio
+            mlp_match = re.search(r'mlp.*?(\d+\.?\d*)%', response.lower())
+            if mlp_match:
+                decisions['mlp_ratio'] = float(mlp_match.group(1)) / 100.0
+            
+            # Extract attention pruning ratio  
+            attn_match = re.search(r'attention.*?(\d+\.?\d*)%', response.lower())
+            if attn_match:
+                decisions['attention_ratio'] = float(attn_match.group(1)) / 100.0
+            
+            # Extract overall strategy
+            if 'aggressive' in response.lower():
+                decisions['strategy'] = 'aggressive'
+            elif 'conservative' in response.lower():
+                decisions['strategy'] = 'conservative'
+            else:
+                decisions['strategy'] = 'balanced'
+            
+            # Extract safety validation
+            decisions['safety_validated'] = 'safety' in response.lower() and 'validated' in response.lower()
+            
+            # Extract execution plan steps
+            execution_steps = []
+            lines = response.split('\n')
+            for line in lines:
+                if any(keyword in line.lower() for keyword in ['step', 'prune', 'execute', 'apply']):
+                    execution_steps.append(line.strip())
+            
+            decisions['execution_steps'] = execution_steps[:5]  # Limit to 5 steps
+            
+            # Determine success based on content
+            success = (
+                len(decisions) > 2 and 
+                'error' not in response.lower() and
+                'fail' not in response.lower()
+            )
+            
+            return AgentResponse(
+                success=success,
+                data=decisions,
+                message=f"Parsed pruning strategy: {decisions.get('strategy', 'unknown')}",
+                confidence=0.9 if success else 0.3
+            )
+            
+        except Exception as e:
+            return AgentResponse(
+                success=False,
+                data={},
+                message=f"Failed to parse pruning response: {str(e)}",
+                confidence=0.0
+            )
