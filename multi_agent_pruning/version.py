@@ -1,15 +1,15 @@
 """Version information for Multi-Agent LLM Pruning Framework."""
 
-__version__ = "0.1.0"
-__author__ = "Multi-Agent Pruning Research Team"
-__email__ = "research@example.com"
+__version__ = "0.2.0"
+__author__ = "Mahdi Banisharifdekordi"
+__email__ = "msharif@iastate.edu"
 __description__ = "Multi-Agent LLM Pruning Framework for Neural Network Compression"
-__url__ = "https://github.com/example/multi-agent-pruning"
+__url__ = "https://github.com/BanisharifM/Multi-Agent-Pruning"
 
 # Version components
 VERSION_INFO = {
     'major': 0,
-    'minor': 1, 
+    'minor': 2, 
     'patch': 0,
     'pre_release': None,
     'build': None
