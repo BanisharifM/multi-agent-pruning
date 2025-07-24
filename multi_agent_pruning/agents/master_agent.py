@@ -15,6 +15,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 import numpy as np
 import logging
+from datetime import datetime
 
 from .base_agent import BaseAgent, AgentResponse
 
@@ -104,7 +105,160 @@ class MasterAgent(BaseAgent):
         self.safety_margin = risk_config.get('safety_margin', 0.05)
         
         logger.info(f"🧠 Master Agent components initialized with {len(self.exploration_strategies)} strategies")
+
+    def _prepare_context(self, input_data) -> Dict[str, Any]:
+        """Prepare context from input data (handles both PruningState objects and dictionaries)."""
+        
+        # Handle PruningState object
+        if hasattr(input_data, 'model_name'):
+            # It's a PruningState object - extract relevant information
+            context = {
+                'model_name': input_data.model_name,
+                'dataset': input_data.dataset,
+                'target_ratio': input_data.target_ratio,
+                'revision_number': input_data.revision_number,
+                'max_revisions': input_data.max_revisions,
+                'num_classes': input_data.num_classes,
+                'input_size': input_data.input_size,
+                'history': input_data.history,
+                'attempted_ratios': input_data.attempted_pruning_ratios,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            # Add model info if available
+            if hasattr(input_data, 'model') and input_data.model is not None:
+                context['model_info'] = {
+                    'architecture_type': self._detect_architecture_type(input_data.model_name),
+                    'has_model': True
+                }
+            else:
+                context['model_info'] = {
+                    'architecture_type': self._detect_architecture_type(input_data.model_name),
+                    'has_model': False
+                }
+            
+            # Add dataset info
+            context['dataset_info'] = self._get_dataset_info(input_data.dataset)
+            
+            # Add agent results if available
+            if hasattr(input_data, 'profile_results') and input_data.profile_results:
+                context['profile_results'] = input_data.profile_results
+            
+            return context
+        
+        # Handle dictionary input (fallback)
+        elif isinstance(input_data, dict):
+            # Create a copy to avoid modifying original
+            import copy
+            context = copy.deepcopy(input_data)
+            
+            # Ensure required fields exist
+            context.setdefault('revision_number', 0)
+            context.setdefault('max_revisions', self.max_iterations)
+            context.setdefault('history', [])
+            context.setdefault('attempted_ratios', [])
+            context.setdefault('timestamp', datetime.now().isoformat())
+            
+            # Add dataset info if not present
+            if 'dataset_info' not in context:
+                dataset_name = context.get('dataset', 'imagenet')
+                context['dataset_info'] = self._get_dataset_info(dataset_name)
+            
+            return context
+        
+        else:
+            # Unknown input type - create minimal context
+            logger.warning(f"⚠️ Unknown input type: {type(input_data)}")
+            return {
+                'revision_number': 0,
+                'max_revisions': self.max_iterations,
+                'target_ratio': 0.5,
+                'history': [],
+                'attempted_ratios': [],
+                'timestamp': datetime.now().isoformat(),
+                'dataset_info': self._get_dataset_info('imagenet'),
+                'model_info': {'architecture_type': 'unknown', 'has_model': False}
+            }
     
+    def _detect_architecture_type(self, model_name: str) -> str:
+        """Detect architecture type from model name."""
+        
+        model_name_lower = model_name.lower()
+        
+        if any(x in model_name_lower for x in ['deit', 'vit', 'swin', 'beit']):
+            return 'vision_transformer'
+        elif any(x in model_name_lower for x in ['resnet', 'resnext', 'densenet']):
+            return 'cnn'
+        elif any(x in model_name_lower for x in ['convnext', 'efficientnet']):
+            return 'modern_cnn'
+        elif any(x in model_name_lower for x in ['mobilenet', 'shufflenet']):
+            return 'mobile_cnn'
+        else:
+            return 'unknown'
+    
+    def _get_dataset_info(self, dataset_name: str) -> Dict[str, Any]:
+        """Get dataset-specific information and safety limits."""
+        
+        dataset_name_lower = dataset_name.lower()
+        
+        if dataset_name_lower == 'imagenet':
+            return {
+                'num_classes': 1000,
+                'complexity': 'high',
+                'pruning_difficulty': 'hard',
+                'recommended_approach': 'conservative',
+                'importance_criterion': 'taylor',
+                'safety_limits': {
+                    'max_mlp_pruning': 0.15,
+                    'max_attention_pruning': 0.10,
+                    'max_overall_pruning': 0.60,
+                    'min_accuracy_threshold': 0.40
+                }
+            }
+        elif dataset_name_lower == 'cifar10':
+            return {
+                'num_classes': 10,
+                'complexity': 'medium',
+                'pruning_difficulty': 'medium',
+                'recommended_approach': 'moderate',
+                'importance_criterion': 'l1norm',
+                'safety_limits': {
+                    'max_mlp_pruning': 0.30,
+                    'max_attention_pruning': 0.25,
+                    'max_overall_pruning': 0.80,
+                    'min_accuracy_threshold': 0.50
+                }
+            }
+        elif dataset_name_lower == 'cifar100':
+            return {
+                'num_classes': 100,
+                'complexity': 'medium-high',
+                'pruning_difficulty': 'medium-hard',
+                'recommended_approach': 'conservative',
+                'importance_criterion': 'taylor',
+                'safety_limits': {
+                    'max_mlp_pruning': 0.20,
+                    'max_attention_pruning': 0.15,
+                    'max_overall_pruning': 0.70,
+                    'min_accuracy_threshold': 0.35
+                }
+            }
+        else:
+            # Default/unknown dataset
+            return {
+                'num_classes': 1000,
+                'complexity': 'unknown',
+                'pruning_difficulty': 'unknown',
+                'recommended_approach': 'conservative',
+                'importance_criterion': 'l1norm',
+                'safety_limits': {
+                    'max_mlp_pruning': 0.15,
+                    'max_attention_pruning': 0.10,
+                    'max_overall_pruning': 0.60,
+                    'min_accuracy_threshold': 0.40
+                }
+            }
+
     def get_agent_role(self) -> str:
         """Return the role description for this agent."""
         return """Strategic coordinator for multi-agent pruning workflow, specializing in 
@@ -405,12 +559,13 @@ Your response must be a valid JSON object with strategic recommendations."""
         max_overall = safety_limits.get('max_overall_pruning', 0.8)
         if strategy.pruning_ratio > max_overall:
             logger.warning(f"⚠️ Pruning ratio {strategy.pruning_ratio:.1%} exceeds limit {max_overall:.1%}")
-            strategy.pruning_ratio = max_overall * self.safety_multiplier
+            safety_margin = self.safety_margin  # Already defined in _initialize_agent_components
+            strategy.pruning_ratio = max_overall * (1 - safety_margin)
             strategy.risk_level = 'high'
             strategy.rationale += f". Clamped to safety limit {max_overall:.1%}"
         
         return strategy
-    
+
     def _create_strategy_response(self, strategy: PruningStrategy, 
                                 context: Dict[str, Any],
                                 history_analysis: Dict[str, Any]) -> Dict[str, Any]:
