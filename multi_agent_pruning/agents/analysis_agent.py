@@ -134,7 +134,6 @@ class AnalysisAgent(BaseAgent):
             logger.error("❌ Profiling results must be a dictionary")
             return False
         
-        # FIXED: More flexible validation - check what's actually available
         logger.info(f"🔍 Available profiling fields: {list(profiling_results.keys())}")
         
         # Check if we have any useful profiling data
@@ -142,7 +141,6 @@ class AnalysisAgent(BaseAgent):
             logger.error("❌ Profiling results dictionary is empty")
             return False
         
-        # FIXED: Don't require specific field names, just check if we have some data
         # The profiling agent might return different field structures
         has_useful_data = any(
             isinstance(value, dict) and value 
@@ -210,13 +208,353 @@ class AnalysisAgent(BaseAgent):
             
             logger.info("🔧 Analyzers initialized successfully")
 
+    def _analyze_isomorphic_groups(self, state: PruningState) -> Dict[str, Any]:
+        """Analyze isomorphic layer groups for coordinated pruning."""
+        
+        try:
+            if self.isomorphic_analyzer is None:
+                logger.warning("⚠️ Isomorphic analyzer not initialized, using basic analysis")
+                return {
+                    'isomorphic_groups': [],
+                    'group_count': 0,
+                    'coordination_opportunities': [],
+                    'analysis_method': 'basic_fallback'
+                }
+            
+            # Use the isomorphic analyzer
+            isomorphic_results = self.isomorphic_analyzer.analyze_isomorphic_groups()
+            
+            return {
+                'isomorphic_groups': isomorphic_results.get('groups', []),
+                'group_count': len(isomorphic_results.get('groups', [])),
+                'coordination_opportunities': isomorphic_results.get('coordination_opportunities', []),
+                'similarity_scores': isomorphic_results.get('similarity_scores', {}),
+                'analysis_method': 'isomorphic_analyzer'
+            }
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Isomorphic analysis failed: {str(e)}, using fallback")
+            return {
+                'isomorphic_groups': [],
+                'group_count': 0,
+                'coordination_opportunities': [],
+                'error': str(e),
+                'analysis_method': 'error_fallback'
+            }
+
+    def _analyze_sensitivity(self, state: PruningState) -> Dict[str, Any]:
+        """Analyze layer sensitivity to pruning for strategic recommendations."""
+        
+        try:
+            model = state.model
+            if model is None:
+                return {
+                    'sensitivity_scores': {},
+                    'high_sensitivity_layers': [],
+                    'low_sensitivity_layers': [],
+                    'analysis_method': 'no_model'
+                }
+            
+            # Basic sensitivity analysis based on layer types and parameters
+            sensitivity_scores = {}
+            high_sensitivity = []
+            low_sensitivity = []
+            
+            for name, module in model.named_modules():
+                if len(list(module.children())) == 0:  # Leaf modules only
+                    module_type = type(module).__name__
+                    
+                    # Assign sensitivity based on layer type
+                    if 'Attention' in module_type or 'MultiheadAttention' in module_type:
+                        sensitivity = 0.9  # High sensitivity
+                    elif 'LayerNorm' in module_type or 'BatchNorm' in module_type:
+                        sensitivity = 0.8  # High sensitivity
+                    elif 'Linear' in module_type and hasattr(module, 'weight'):
+                        # Check if it's a classifier (last layer)
+                        if 'classifier' in name.lower() or 'head' in name.lower():
+                            sensitivity = 0.95  # Very high sensitivity
+                        else:
+                            sensitivity = 0.6  # Medium sensitivity
+                    elif 'Conv' in module_type:
+                        sensitivity = 0.5  # Medium sensitivity
+                    elif 'Dropout' in module_type or 'ReLU' in module_type:
+                        sensitivity = 0.2  # Low sensitivity
+                    else:
+                        sensitivity = 0.5  # Default medium sensitivity
+                    
+                    sensitivity_scores[name] = sensitivity
+                    
+                    if sensitivity > 0.8:
+                        high_sensitivity.append(name)
+                    elif sensitivity < 0.4:
+                        low_sensitivity.append(name)
+            
+            return {
+                'sensitivity_scores': sensitivity_scores,
+                'high_sensitivity_layers': high_sensitivity,
+                'low_sensitivity_layers': low_sensitivity,
+                'average_sensitivity': sum(sensitivity_scores.values()) / len(sensitivity_scores) if sensitivity_scores else 0,
+                'analysis_method': 'layer_type_based'
+            }
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Sensitivity analysis failed: {str(e)}")
+            return {
+                'sensitivity_scores': {},
+                'high_sensitivity_layers': [],
+                'low_sensitivity_layers': [],
+                'error': str(e),
+                'analysis_method': 'error_fallback'
+            }
+
+    def _identify_pruning_opportunities(self, state: PruningState) -> Dict[str, Any]:
+        """Identify specific pruning opportunities based on analysis results."""
+        
+        try:
+            model = state.model
+            if model is None:
+                return {
+                    'opportunities': [],
+                    'total_opportunities': 0,
+                    'potential_reduction': 0,
+                    'analysis_method': 'no_model'
+                }
+            
+            opportunities = []
+            total_params = 0
+            prunable_params = 0
+            
+            for name, module in model.named_modules():
+                if hasattr(module, 'weight') and module.weight is not None:
+                    module_params = module.weight.numel()
+                    total_params += module_params
+                    
+                    module_type = type(module).__name__
+                    
+                    # Determine pruning potential
+                    if 'Linear' in module_type:
+                        if 'classifier' in name.lower() or 'head' in name.lower():
+                            pruning_potential = 0.1  # Conservative for classifier
+                        else:
+                            pruning_potential = 0.6  # Good potential for other linear layers
+                    elif 'Conv' in module_type:
+                        pruning_potential = 0.5  # Medium potential for conv layers
+                    else:
+                        pruning_potential = 0.3  # Conservative for other types
+                    
+                    prunable_params += module_params * pruning_potential
+                    
+                    opportunities.append({
+                        'layer_name': name,
+                        'layer_type': module_type,
+                        'parameters': module_params,
+                        'pruning_potential': pruning_potential,
+                        'estimated_reduction': int(module_params * pruning_potential)
+                    })
+            
+            # Sort by potential reduction
+            opportunities.sort(key=lambda x: x['estimated_reduction'], reverse=True)
+            
+            return {
+                'opportunities': opportunities,
+                'total_opportunities': len(opportunities),
+                'potential_reduction': prunable_params / total_params if total_params > 0 else 0,
+                'total_parameters': total_params,
+                'prunable_parameters': int(prunable_params),
+                'analysis_method': 'parameter_based'
+            }
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Pruning opportunities analysis failed: {str(e)}")
+            return {
+                'opportunities': [],
+                'total_opportunities': 0,
+                'potential_reduction': 0,
+                'error': str(e),
+                'analysis_method': 'error_fallback'
+            }
+
+    def _assess_architecture_complexity(self, layer_types: Dict[str, int], total_layers: int) -> str:
+        """Assess the complexity of the model architecture."""
+        
+        if total_layers == 0:
+            return 'unknown'
+        
+        # Count different layer types
+        unique_types = len(layer_types)
+        
+        # Check for complex layer types
+        complex_types = ['MultiheadAttention', 'Attention', 'TransformerBlock', 'LayerNorm']
+        has_complex_layers = any(layer_type in str(layer_types.keys()) for layer_type in complex_types)
+        
+        if total_layers > 100 or (has_complex_layers and total_layers > 50):
+            return 'high'
+        elif total_layers > 50 or (has_complex_layers and total_layers > 20):
+            return 'medium'
+        elif total_layers > 20:
+            return 'medium-low'
+        else:
+            return 'low'
+
+    def _assess_constraint_risk(self, constraints: Dict[str, Any], state: PruningState) -> str:
+        """Assess the risk level of constraint violations."""
+        
+        constraint_count = len(constraints.get('coupling_constraints', []))
+        dependency_count = len(constraints.get('layer_dependencies', []))
+        
+        total_constraints = constraint_count + dependency_count
+        
+        if total_constraints > 50:
+            return 'high'
+        elif total_constraints > 20:
+            return 'medium'
+        elif total_constraints > 5:
+            return 'low'
+        else:
+            return 'minimal'
+
+    def _recommend_importance_criterion(self, model_analysis: Dict[str, Any], 
+                                      analysis_results: Dict[str, Any],
+                                      master_directives: Dict[str, Any]) -> str:
+        """Recommend the best importance criterion based on analysis."""
+        
+        # Check master agent directive first
+        if 'importance_criterion' in master_directives:
+            return master_directives['importance_criterion']
+        
+        # Analyze architecture type
+        arch_type = model_analysis.get('architecture_type', 'unknown')
+        
+        if 'transformer' in arch_type.lower() or 'attention' in arch_type.lower():
+            return 'taylor'  # Taylor expansion works well for transformers
+        elif 'cnn' in arch_type.lower() or 'conv' in arch_type.lower():
+            return 'l1norm'  # L1 norm works well for CNNs
+        else:
+            return self.default_importance_criterion
+
+    def _recommend_pruning_ratios(self, analysis_results: Dict[str, Any],
+                                master_directives: Dict[str, Any]) -> Dict[str, Any]:
+        """Recommend layer-specific pruning ratios."""
+        
+        # Get master agent directive
+        global_ratio = master_directives.get('pruning_ratio', 0.5)
+        
+        # Get sensitivity analysis
+        sensitivity = analysis_results.get('sensitivity_analysis', {})
+        sensitivity_scores = sensitivity.get('sensitivity_scores', {})
+        
+        # Create layer-specific ratios
+        layer_ratios = {}
+        
+        for layer_name, sensitivity_score in sensitivity_scores.items():
+            # Adjust ratio based on sensitivity (lower sensitivity = higher pruning)
+            if sensitivity_score > 0.8:
+                layer_ratios[layer_name] = global_ratio * 0.5  # Conservative for sensitive layers
+            elif sensitivity_score > 0.6:
+                layer_ratios[layer_name] = global_ratio * 0.8  # Moderate for medium sensitivity
+            else:
+                layer_ratios[layer_name] = global_ratio * 1.2  # Aggressive for low sensitivity
+        
+        return {
+            'global_ratio': global_ratio,
+            'layer_specific_ratios': layer_ratios,
+            'adaptation_strategy': 'sensitivity_based'
+        }
+
+    def _recommend_group_multipliers(self, analysis_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Recommend group multipliers for coordinated pruning."""
+        
+        isomorphic_analysis = analysis_results.get('isomorphic_analysis', {})
+        groups = isomorphic_analysis.get('isomorphic_groups', [])
+        
+        group_multipliers = {}
+        
+        for i, group in enumerate(groups):
+            group_id = f"group_{i}"
+            group_size = len(group.get('layers', []))
+            
+            # Larger groups get more conservative multipliers
+            if group_size > 10:
+                multiplier = 0.8
+            elif group_size > 5:
+                multiplier = 0.9
+            else:
+                multiplier = 1.0
+            
+            group_multipliers[group_id] = {
+                'multiplier': multiplier,
+                'layers': group.get('layers', []),
+                'rationale': f'Group size: {group_size}'
+            }
+        
+        return {
+            'group_multipliers': group_multipliers,
+            'coordination_strategy': 'size_based'
+        }
+
+    def _recommend_safety_constraints(self, analysis_results: Dict[str, Any],
+                                    state: PruningState) -> Dict[str, Any]:
+        """Recommend safety constraints based on analysis."""
+        
+        sensitivity = analysis_results.get('sensitivity_analysis', {})
+        high_sensitivity_layers = sensitivity.get('high_sensitivity_layers', [])
+        
+        return {
+            'protected_layers': high_sensitivity_layers,
+            'max_layer_pruning': 0.8,
+            'min_accuracy_threshold': 0.4,
+            'safety_margin': self.safety_margin,
+            'constraint_enforcement': 'strict' if self.conservative_mode else 'moderate'
+        }
+
+    def _recommend_execution_strategy(self, analysis_results: Dict[str, Any],
+                                    master_directives: Dict[str, Any]) -> Dict[str, Any]:
+        """Recommend execution strategy for pruning."""
+        
+        complexity = analysis_results.get('architecture_analysis', {}).get('architecture_complexity', 'medium')
+        
+        if complexity == 'high':
+            approach = 'gradual'
+            phases = 3
+        elif complexity == 'medium':
+            approach = 'moderate'
+            phases = 2
+        else:
+            approach = 'direct'
+            phases = 1
+        
+        return {
+            'approach': approach,
+            'phases': phases,
+            'execution_phases': self._define_execution_phases(approach),
+            'validation_strategy': 'per_phase' if phases > 1 else 'final'
+        }
+
+    def _define_execution_phases(self, approach: str) -> List[Dict[str, Any]]:
+        """Define execution phases based on approach."""
+        
+        if approach == 'gradual':
+            return [
+                {'phase': 1, 'ratio': 0.3, 'focus': 'low_sensitivity_layers'},
+                {'phase': 2, 'ratio': 0.6, 'focus': 'medium_sensitivity_layers'},
+                {'phase': 3, 'ratio': 1.0, 'focus': 'final_adjustments'}
+            ]
+        elif approach == 'moderate':
+            return [
+                {'phase': 1, 'ratio': 0.7, 'focus': 'bulk_pruning'},
+                {'phase': 2, 'ratio': 1.0, 'focus': 'fine_tuning'}
+            ]
+        else:
+            return [
+                {'phase': 1, 'ratio': 1.0, 'focus': 'direct_pruning'}
+            ]
+
     def _perform_comprehensive_analysis(self, state: PruningState) -> Dict[str, Any]:
         """Perform comprehensive analysis of the model and profiling results."""
         
         with self.profiler.timer("comprehensive_analysis"):
             logger.info("🔍 Performing comprehensive analysis")
             
-            # FIXED: Use flexible data retrieval
             model_analysis = self._get_profiling_data(state, 'model_analysis')
             
             analysis_results = {
@@ -234,7 +572,6 @@ class AnalysisAgent(BaseAgent):
     def _analyze_architecture(self, state: PruningState) -> Dict[str, Any]:
         """Analyze model architecture for pruning insights."""
         
-        # FIXED: Use flexible data retrieval
         layer_analysis = self._get_profiling_data(state, 'layer_analysis', {})
         
         if not layer_analysis:
@@ -521,7 +858,6 @@ class AnalysisAgent(BaseAgent):
         with self.profiler.timer("strategic_recommendations"):
             logger.info("💡 Generating strategic recommendations")
             
-            # FIXED: Use flexible data retrieval
             model_analysis = self._get_profiling_data(state, 'model_analysis')
             
             # Get master agent directives
