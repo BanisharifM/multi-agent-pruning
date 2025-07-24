@@ -1,15 +1,23 @@
 """
-Agent Coordinator for Multi-Agent LLM Pruning Workflow
+Agent Coordinator for Multi-Agent LLM Pruning Workflow - UPDATED VERSION
 
 Implements the exact workflow shown in the user's diagram:
 START → Profiling Agent → Master Agent → Analysis Agent → Pruning Agent → Fine-Tuning Agent → Evaluation Agent
 
 This coordinator manages the sequential execution of agents and handles
 the flow of information between them.
+
+FIXES APPLIED:
+- Fix 1: Coordinator State Management Unification
+- Fix 3: Configuration Propagation System  
+- Fix 4: Safety Configuration Enforcement
+- Fix 5: Precomputation Activation
+- Fix 6: Error Handling and Diagnostics
 """
 
+import os
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import asdict
 import json
 from datetime import datetime
@@ -44,23 +52,8 @@ class AgentCoordinator:
         self.logger = logging.getLogger(__name__)
         self.profiler = TimingProfiler()
         
-        # Initialize all agents
-        self.agents = {
-            'profiling': ProfilingAgent(self.config.get('profiling_agent', {})),
-            'master': MasterAgent(self.config.get('master_agent', {})),
-            'analysis': AnalysisAgent(self.config.get('analysis_agent', {})),
-            'pruning': PruningAgent(self.config.get('pruning_agent', {})),
-            'finetuning': FinetuningAgent(self.config.get('finetuning_agent', {})),
-            'evaluation': EvaluationAgent(self.config.get('evaluation_agent', {}))
-        }
-
-        # Create individual agent references
-        self.profiling_agent = self.agents['profiling']
-        self.master_agent = self.agents['master']
-        self.analysis_agent = self.agents['analysis']
-        self.pruning_agent = self.agents['pruning']
-        self.finetuning_agent = self.agents['finetuning']
-        self.evaluation_agent = self.agents['evaluation']
+        # Initialize all agents with proper configuration propagation
+        self._initialize_agents()
 
         # Workflow state
         self.current_step = 0
@@ -69,6 +62,247 @@ class AgentCoordinator:
         ]
         
         logger.info("🤖 Agent Coordinator initialized with 6-agent workflow")
+    
+    def _initialize_agents(self):
+        """Initialize all agents with proper constructor parameters and configuration propagation."""
+        
+        # Extract agent configurations
+        agent_configs = self.config.get('agents', {})
+        global_agent_config = agent_configs.get('global', {})
+        
+        # Create LLM client for agents
+        llm_client = self._create_llm_client()
+        
+        # Initialize agents with standardized pattern
+        self.agents = {
+            'profiling': ProfilingAgent(
+                config={**global_agent_config, **agent_configs.get('profiling_agent', {})},
+                llm_client=llm_client,
+                profiler=self.profiler
+            ),
+            'master': MasterAgent(
+                config={**global_agent_config, **agent_configs.get('master_agent', {})},
+                llm_client=llm_client,
+                profiler=self.profiler
+            ),
+            'analysis': AnalysisAgent(
+                config={**global_agent_config, **agent_configs.get('analysis_agent', {})},
+                llm_client=llm_client,
+                profiler=self.profiler
+            ),
+            'pruning': PruningAgent(
+                config={**global_agent_config, **agent_configs.get('pruning_agent', {})},
+                llm_client=llm_client,
+                profiler=self.profiler
+            ),
+            'finetuning': FinetuningAgent(
+                config={**global_agent_config, **agent_configs.get('finetuning_agent', {})},
+                llm_client=llm_client,
+                profiler=self.profiler
+            ),
+            'evaluation': EvaluationAgent(
+                config={**global_agent_config, **agent_configs.get('evaluation_agent', {})},
+                llm_client=llm_client,
+                profiler=self.profiler
+            )
+        }
+
+        # Create individual agent references for backward compatibility
+        self.profiling_agent = self.agents['profiling']
+        self.master_agent = self.agents['master']
+        self.analysis_agent = self.agents['analysis']
+        self.pruning_agent = self.agents['pruning']
+        self.finetuning_agent = self.agents['finetuning']
+        self.evaluation_agent = self.agents['evaluation']
+        
+        logger.info("🤖 All agents initialized with standardized pattern")
+
+    def _create_llm_client(self):
+        """Create LLM client based on configuration."""
+        llm_config = self.config.get('llm', {})
+        
+        if llm_config.get('enabled', True):
+            try:
+                from openai import OpenAI
+                return OpenAI(
+                    api_key=os.getenv('OPENAI_API_KEY'),
+                    base_url=llm_config.get('base_url'),
+                    timeout=llm_config.get('timeout', 30)
+                )
+            except ImportError:
+                logger.warning("OpenAI client not available")
+                return None
+        else:
+            return None
+
+    def _ensure_profiler_availability(self):
+        """Ensure that profiler is available for agents that need it."""
+        
+        if self.profiler is None:
+            logger.warning("No profiler provided, creating default profiler")
+            try:
+                from ..utils.profiler import TimingProfiler
+                self.profiler = TimingProfiler(enabled=True)
+            except ImportError:
+                logger.error("Cannot create profiler, performance monitoring disabled")
+                self.profiler = None
+        
+        # Validate profiler functionality
+        if self.profiler is not None:
+            try:
+                with self.profiler.timer("profiler_test"):
+                    pass
+                logger.info("✅ Profiler validation successful")
+            except Exception as e:
+                logger.warning(f"Profiler validation failed: {e}, disabling profiler")
+                self.profiler = None
+
+    def run_pruning(self, model, train_loader, val_loader, test_loader):
+        """
+        Run the complete multi-agent pruning workflow with proper state management.
+        
+        Args:
+            model: PyTorch model to prune
+            train_loader: Training data loader
+            val_loader: Validation data loader  
+            test_loader: Test data loader
+            
+        Returns:
+            Dict containing pruning results and metrics
+        """
+        
+        self.logger.info("🚀 Starting multi-agent pruning workflow")
+        
+        try:
+            # Create proper state using StateManager
+            state_manager = StateManager(cache_dir=self.config.get('cache_dir', './cache'))
+            
+            # Extract configuration parameters
+            model_name = self.config.get('model', {}).get('name', 'unknown')
+            dataset_name = self.config.get('dataset', {}).get('name', 'imagenet')
+            target_ratio = self.config.get('pruning', {}).get('target_ratio', 0.5)
+            
+            # Create comprehensive query
+            query = f"Prune {model_name} to {target_ratio:.1%} parameter reduction on {dataset_name}"
+            
+            # Create proper state object
+            state = state_manager.create_state(
+                query=query,
+                model_name=model_name,
+                dataset=dataset_name,
+                target_ratio=target_ratio,
+                num_classes=self.config.get('dataset', {}).get('num_classes', 1000),
+                input_size=self.config.get('dataset', {}).get('input_size', 224),
+                data_path=self.config.get('dataset', {}).get('data_path', '')
+            )
+            
+            # Set the model reference properly
+            state.model = model
+            
+            # Store data loaders in state for agent access
+            state.train_loader = train_loader
+            state.val_loader = val_loader
+            state.test_loader = test_loader
+            
+            # Apply safety constraints
+            safety_constraints = self._apply_safety_constraints(state)
+            
+            # Ensure precomputation is active
+            self._ensure_precomputation_active(state)
+            
+            # Validate workflow state
+            is_valid, errors = self._validate_workflow_state(state)
+            if not is_valid:
+                raise RuntimeError(f"Workflow state validation failed: {errors}")
+            
+            # Use the unified workflow
+            return self.run_pruning_workflow(state)
+            
+        except Exception as e:
+            self.logger.error(f"❌ Pruning workflow failed: {str(e)}")
+            raise
+
+    def _apply_safety_constraints(self, state: PruningState) -> Dict[str, Any]:
+        """Apply safety constraints based on configuration and dataset."""
+        
+        dataset_name = state.dataset.lower()
+        safety_config = self.config.get('datasets', {}).get(dataset_name, {}).get('safety_limits', {})
+        
+        # Apply dataset-specific safety limits
+        safety_constraints = {
+            'max_mlp_pruning': safety_config.get('max_mlp_pruning', 0.15),
+            'max_attention_pruning': safety_config.get('max_attention_pruning', 0.10),
+            'max_overall_pruning': safety_config.get('max_overall_pruning', 0.60),
+            'min_accuracy_threshold': safety_config.get('min_accuracy_threshold', 0.40)
+        }
+        
+        # Validate target ratio against safety limits
+        if state.target_ratio > safety_constraints['max_overall_pruning']:
+            logger.warning(f"Target ratio {state.target_ratio:.1%} exceeds safety limit {safety_constraints['max_overall_pruning']:.1%}")
+            state.target_ratio = safety_constraints['max_overall_pruning']
+        
+        return safety_constraints
+
+    def _ensure_precomputation_active(self, state: PruningState):
+        """Ensure that precomputation is properly activated for the state."""
+        
+        if not hasattr(state, '_precomputed_cache') or not state._precomputed_cache:
+            # Precomputation was not activated, activate it now
+            state_manager = StateManager(cache_dir=state._cache_dir or './cache')
+            state_manager._schedule_precomputation(state)
+            
+            logger.info("🚀 Precomputation activated for existing state")
+        
+        # Verify precomputation status
+        precomputation_status = self._get_precomputation_status(state)
+        missing_precomputation = [key for key, available in precomputation_status.items() if not available]
+        
+        if missing_precomputation:
+            logger.warning(f"⚠️ Missing precomputation for: {missing_precomputation}")
+        else:
+            logger.info("✅ All precomputation data available")
+
+    def _get_precomputation_status(self, state: PruningState) -> Dict[str, bool]:
+        """Get status of precomputation data."""
+        
+        if not hasattr(state, '_precomputed_cache'):
+            return {}
+        
+        return {
+            'model_analysis': 'model_analysis' in state._precomputed_cache,
+            'dependency_analysis': 'dependency_analysis' in state._precomputed_cache,
+            'importance_scores': 'importance_scores' in state._precomputed_cache,
+            'dataset_stats': 'dataset_stats' in state._precomputed_cache
+        }
+
+    def _validate_workflow_state(self, state: PruningState) -> Tuple[bool, List[str]]:
+        """Comprehensive validation of workflow state with detailed diagnostics."""
+        
+        errors = []
+        
+        # Validate required fields
+        required_fields = ['model', 'model_name', 'dataset', 'target_ratio']
+        for field in required_fields:
+            if not hasattr(state, field) or getattr(state, field) is None:
+                errors.append(f"Missing required field: {field}")
+        
+        # Validate model reference
+        if hasattr(state, 'model') and state.model is not None:
+            if not hasattr(state.model, 'parameters'):
+                errors.append("Model object does not appear to be a valid PyTorch model")
+        
+        # Validate configuration consistency
+        if state.target_ratio <= 0 or state.target_ratio >= 1:
+            errors.append(f"Invalid target ratio: {state.target_ratio} (must be between 0 and 1)")
+        
+        # Validate precomputation status
+        if hasattr(state, '_precomputed_cache'):
+            cache_status = self._get_precomputation_status(state)
+            missing_cache = [key for key, available in cache_status.items() if not available]
+            if missing_cache:
+                errors.append(f"Missing precomputed data: {missing_cache}")
+        
+        return len(errors) == 0, errors
     
     def _extract_response_data(self, response, operation_name: str):
         """Extract data from agent response (handles both dict and AgentResponse)."""
@@ -173,12 +407,9 @@ class AgentCoordinator:
         agent = self.agents[agent_name]
         
         try:
-            # Prepare agent input based on current state
-            agent_input = self._prepare_agent_input(agent_name, state)
-            
-            # Execute agent
-            logger.debug(f"🔧 Executing {agent_name} agent with input keys: {list(agent_input.keys())}")
-            result = agent.execute(agent_input)
+            # Execute agent with state object directly
+            logger.debug(f"🔧 Executing {agent_name} agent with PruningState")
+            result = agent.execute(state)
             
             # Extract response data (handles both dict and AgentResponse)
             success, message, data = self._extract_response_data(result, agent_name)
@@ -200,80 +431,6 @@ class AgentCoordinator:
                 'agent': agent_name,
                 'timestamp': datetime.now().isoformat()
             }
-    
-    def _prepare_agent_input(self, agent_name: str, state: PruningState) -> Dict[str, Any]:
-        """Prepare input for each agent based on workflow state."""
-        
-        base_input = {
-            'model_name': state.model_name,
-            'dataset': state.dataset,
-            'target_ratio': state.target_ratio,
-            'num_classes': state.num_classes,
-            'input_size': state.input_size,
-            'query': state.query
-        }
-        
-        if agent_name == 'profiling':
-            # Profiling Agent: Initial model analysis
-            return {
-                **base_input,
-                'model': state.model,
-                'data_path': state.data_path
-            }
-        
-        elif agent_name == 'master':
-            # Master Agent: Strategic coordination
-            return {
-                **base_input,
-                'profile_results': state.profile_results,
-                'history': state.history,
-                'revision_number': state.revision_number,
-                'attempted_ratios': state.attempted_pruning_ratios
-            }
-        
-        elif agent_name == 'analysis':
-            # Analysis Agent: Architecture-specific recommendations
-            return {
-                **base_input,
-                'profile_results': state.profile_results,
-                'master_results': state.master_results,
-                'revision_number': state.revision_number
-            }
-        
-        elif agent_name == 'pruning':
-            # Pruning Agent: Execute pruning
-            return {
-                **base_input,
-                'model': state.model,
-                'analysis_results': state.analysis_results,
-                'master_directives': state.master_results.get('directives', {}) if state.master_results else {},
-                'importance_criterion': state.analysis_results.get('importance_criterion', 'taylor') if state.analysis_results else 'taylor',
-                'pruning_config': state.analysis_results.get('pruning_config', {}) if state.analysis_results else {}
-            }
-        
-        elif agent_name == 'finetuning':
-            # Fine-tuning Agent: Recover performance
-            return {
-                **base_input,
-                'pruned_model': state.pruning_results.get('pruned_model') if state.pruning_results else None,
-                'pruning_info': state.pruning_results.get('pruning_info', {}) if state.pruning_results else {},
-                'zero_shot_accuracy': state.pruning_results.get('zero_shot_accuracy', 0) if state.pruning_results else 0,
-                'target_accuracy': state.master_results.get('target_accuracy', 75.0) if state.master_results else 75.0
-            }
-        
-        elif agent_name == 'evaluation':
-            # Evaluation Agent: Final assessment
-            return {
-                **base_input,
-                'original_model': state.model,
-                'pruned_model': state.pruning_results.get('pruned_model') if state.pruning_results else None,
-                'finetuned_model': state.fine_tuning_results.get('finetuned_model') if state.fine_tuning_results else None,
-                'pruning_info': state.pruning_results.get('pruning_info', {}) if state.pruning_results else {},
-                'finetuning_info': state.fine_tuning_results.get('finetuning_info', {}) if state.fine_tuning_results else {}
-            }
-        
-        else:
-            raise ValueError(f"Unknown agent: {agent_name}")
     
     def _update_state_from_agent_result(self, state: PruningState, 
                                       agent_name: str, result: Dict[str, Any]):
@@ -477,337 +634,3 @@ class AgentCoordinator:
                 agent.reset()
         
         logger.info("🔄 Workflow reset for new execution")
-
-# DELETE
-    # def run_pruning(self, model, train_loader, val_loader, test_loader):
-    #     """
-    #     Run the complete multi-agent pruning workflow.
-        
-    #     Args:
-    #         model: PyTorch model to prune
-    #         train_loader: Training data loader
-    #         val_loader: Validation data loader  
-    #         test_loader: Test data loader
-            
-    #     Returns:
-    #         Dict containing pruning results and metrics
-    #     """
-        
-    #     self.logger.info("🚀 Starting multi-agent pruning workflow")
-        
-    #     try:
-    #         # Initialize workflow state
-    #         workflow_state = {
-    #             'model': model,
-    #             'train_loader': train_loader,
-    #             'val_loader': val_loader,
-    #             'test_loader': test_loader,
-    #             'iteration': 0,
-    #             'converged': False,
-    #             'results': {}
-    #         }
-            
-    #         # Phase 1: Profiling
-    #         self.logger.info("📊 Phase 1: Model Profiling")
-    #         profiling_results = self._run_profiling_phase(workflow_state)
-    #         workflow_state['profiling_results'] = profiling_results
-            
-    #         # Phase 2: Master Agent Planning
-    #         self.logger.info("🧠 Phase 2: Master Agent Planning")
-    #         master_plan = self._run_master_planning_phase(workflow_state)
-    #         workflow_state['master_plan'] = master_plan
-            
-    #         # Phase 3: Iterative Pruning Loop
-    #         self.logger.info("🔄 Phase 3: Iterative Pruning Loop")
-    #         pruning_results = self._run_iterative_pruning_loop(workflow_state)
-    #         workflow_state['pruning_results'] = pruning_results
-            
-    #         # Phase 4: Fine-tuning
-    #         self.logger.info("🎯 Phase 4: Fine-tuning")
-    #         finetuning_results = self._run_finetuning_phase(workflow_state)
-    #         workflow_state['finetuning_results'] = finetuning_results
-            
-    #         # Phase 5: Final Evaluation
-    #         self.logger.info("📊 Phase 5: Final Evaluation")
-    #         evaluation_results = self._run_evaluation_phase(workflow_state)
-    #         workflow_state['evaluation_results'] = evaluation_results
-            
-    #         # Compile final results
-    #         final_results = self._compile_final_results(workflow_state)
-            
-    #         self.logger.info("✅ Multi-agent pruning workflow completed successfully")
-    #         return final_results
-            
-    #     except Exception as e:
-    #         self.logger.error(f"❌ Pruning workflow failed: {str(e)}")
-    #         raise
-
-    def run_pruning(self, model, train_loader, val_loader, test_loader):
-        """
-        Run the complete multi-agent pruning workflow with proper state management.
-        """
-        
-        # Create proper state using StateManager
-        state_manager = StateManager(cache_dir=self.config.get('cache_dir', './cache'))
-        
-        # Extract configuration parameters
-        model_name = self.config.get('model', {}).get('name', 'unknown')
-        dataset_name = self.config.get('dataset', {}).get('name', 'imagenet')
-        target_ratio = self.config.get('pruning', {}).get('target_ratio', 0.5)
-        
-        # Create comprehensive query
-        query = f"Prune {model_name} to {target_ratio:.1%} parameter reduction on {dataset_name}"
-        
-        # Create proper state object
-        state = state_manager.create_state(
-            query=query,
-            model_name=model_name,
-            dataset=dataset_name,
-            target_ratio=target_ratio,
-            num_classes=self.config.get('dataset', {}).get('num_classes', 1000),
-            input_size=self.config.get('dataset', {}).get('input_size', 224),
-            data_path=self.config.get('dataset', {}).get('data_path', '')
-        )
-        
-        # Set the model reference properly
-        state.model = model
-        
-        # Store data loaders in state for agent access
-        state.train_loader = train_loader
-        state.val_loader = val_loader
-        state.test_loader = test_loader
-        
-        # Use the unified workflow
-        return self.run_pruning_workflow(state)
-
-    def _run_profiling_phase(self, workflow_state):
-        """Run the profiling phase."""
-        
-        self.logger.info("🔍 Running profiling agent")
-        
-        context = {
-            'model': workflow_state['model'],
-            'model_info': {
-                'name': self.config.get('model', {}).get('name', 'unknown'),
-                'total_params': sum(p.numel() for p in workflow_state['model'].parameters()),
-                'architecture_type': 'transformer'  # Will be detected by profiling agent
-            },
-            'target_config': self.config.get('pruning', {}),
-            'safety_constraints': {
-                'max_mlp_ratio': 0.15,
-                'max_attention_ratio': 0.10,
-                'min_accuracy': 0.70
-            }
-        }
-        
-        # Run profiling agent
-        profiling_response = self.profiling_agent.execute(context)
-        
-        # Extract response data (handles both dict and AgentResponse)
-        success, message, data = self._extract_response_data(profiling_response, "Profiling")
-        
-        if not success:
-            raise RuntimeError(f"Profiling failed: {message}")
-        
-        self.logger.info(f"✅ Profiling completed: {message}")
-        return data
-
-    def _run_master_planning_phase(self, workflow_state):
-        """Run the master planning phase."""
-        
-        self.logger.info("🧠 Running master agent")
-        
-        context = {
-            'model_info': workflow_state.get('profiling_results', {}).get('model_info', {}),
-            'profiling_results': workflow_state.get('profiling_results', {}),
-            'target_config': self.config.get('pruning', {}),
-            'history': []  # No history for first iteration
-        }
-        
-        # Run master agent
-        master_response = self.master_agent.execute(context)
-        
-        # Extract response data (handles both dict and AgentResponse)
-        success, message, data = self._extract_response_data(master_response, "Master planning")
-        
-        if not success:
-            raise RuntimeError(f"Master planning failed: {message}")
-        
-        self.logger.info(f"✅ Master planning completed: {message}")
-        return data
-
-    def _run_iterative_pruning_loop(self, workflow_state):
-        """Run the iterative pruning loop."""
-        
-        max_iterations = self.config.get('multi_agent', {}).get('max_iterations', 10)
-        convergence_threshold = self.config.get('multi_agent', {}).get('convergence_threshold', 0.001)
-        
-        iteration_results = []
-        current_model = workflow_state['model']
-        
-        for iteration in range(max_iterations):
-            self.logger.info(f"🔄 Iteration {iteration + 1}/{max_iterations}")
-            
-            # Analysis phase
-            self.logger.info("🔍 Running analysis agent")
-            analysis_context = {
-                'model_info': workflow_state.get('profiling_results', {}).get('model_info', {}),
-                'profiling_results': workflow_state.get('profiling_results', {}),
-                'pruning_config': self.config.get('pruning', {}),
-                'history': iteration_results
-            }
-            
-            analysis_response = self.analysis_agent.execute(analysis_context)
-            success, message, analysis_data = self._extract_response_data(analysis_response, "Analysis")
-            
-            if not success:
-                self.logger.warning(f"Analysis failed: {message}")
-                continue
-            
-            # Pruning phase
-            self.logger.info("✂️ Running pruning agent")
-            pruning_context = {
-                'model': current_model,
-                'model_info': workflow_state.get('profiling_results', {}).get('model_info', {}),
-                'analysis_results': analysis_data,
-                'safety_constraints': {
-                    'max_mlp_ratio': 0.15,
-                    'max_attention_ratio': 0.10,
-                    'min_accuracy': 0.70
-                }
-            }
-            
-            pruning_response = self.pruning_agent.execute(pruning_context)
-            success, message, pruning_data = self._extract_response_data(pruning_response, "Pruning")
-            
-            if not success:
-                self.logger.warning(f"Pruning failed: {message}")
-                continue
-            
-            # Store iteration results
-            iteration_result = {
-                'iteration': iteration + 1,
-                'analysis': analysis_data,
-                'pruning': pruning_data,
-                'timestamp': self._get_timestamp()
-            }
-            iteration_results.append(iteration_result)
-            
-            # Check convergence
-            if self._check_convergence(iteration_results, convergence_threshold):
-                self.logger.info(f"✅ Converged after {iteration + 1} iterations")
-                break
-        
-        return {
-            'iterations': iteration_results,
-            'total_iterations': len(iteration_results),
-            'converged': len(iteration_results) < max_iterations
-        }
-
-    def _run_finetuning_phase(self, workflow_state):
-        """Run the fine-tuning phase."""
-        
-        self.logger.info("🎯 Running fine-tuning agent")
-        
-        context = {
-            'model': workflow_state['model'],
-            'model_info': workflow_state.get('profiling_results', {}).get('model_info', {}),
-            'pruning_results': workflow_state.get('pruning_results', {}),
-            'training_config': {
-                'base_lr': 1e-4,
-                'batch_size': self.config.get('dataset', {}).get('batch_size', 32),
-                'max_epochs': 100,
-                'patience': 10
-            },
-            'dataset_info': {
-                'name': self.config.get('dataset', {}).get('name', 'imagenet'),
-                'num_classes': 1000  # ImageNet default
-            }
-        }
-        
-        # Run fine-tuning agent
-        finetuning_response = self.finetuning_agent.execute(context)
-        
-        # Extract response data (handles both dict and AgentResponse)
-        success, message, data = self._extract_response_data(finetuning_response, "Fine-tuning")
-        
-        if not success:
-            self.logger.warning(f"Fine-tuning planning failed: {message}")
-            # Return default fine-tuning plan
-            return {
-                'learning_rate': 1e-4,
-                'training_strategy': 'full_finetuning',
-                'max_epochs': 50,
-                'final_accuracy': 0.75  # Placeholder
-            }
-        
-        self.logger.info(f"✅ Fine-tuning completed: {message}")
-        return data
-
-    def _run_evaluation_phase(self, workflow_state):
-        """Run the evaluation phase."""
-        
-        self.logger.info("📊 Running evaluation agent")
-        
-        context = {
-            'model_info': workflow_state.get('profiling_results', {}).get('model_info', {}),
-            'pruning_results': workflow_state.get('pruning_results', {}),
-            'finetuning_results': workflow_state.get('finetuning_results', {}),
-            'baseline_results': {
-                'original_accuracy': 0.80,  # Placeholder
-                'magnitude_accuracy': 0.75,
-                'taylor_accuracy': 0.76,
-                'isomorphic_accuracy': 0.77
-            }
-        }
-        
-        # Run evaluation agent
-        evaluation_response = self.evaluation_agent.execute(context)
-        
-        # Extract response data (handles both dict and AgentResponse)
-        success, message, data = self._extract_response_data(evaluation_response, "Evaluation")
-        
-        if not success:
-            self.logger.warning(f"Evaluation failed: {message}")
-            # Return basic evaluation
-            return {
-                'overall_rating': 'fair',
-                'rating_score': 3,
-                'publication_ready': False
-            }
-        
-        self.logger.info(f"✅ Evaluation completed: {message}")
-        return data
-
-    def _compile_final_results(self, workflow_state):
-        """Compile final results from all phases."""
-        
-        return {
-            'experiment_name': self.config.get('experiment', {}).get('name', 'unknown'),
-            'model_name': self.config.get('model', {}).get('name', 'unknown'),
-            'profiling_results': workflow_state.get('profiling_results', {}),
-            'master_plan': workflow_state.get('master_plan', {}),
-            'pruning_results': workflow_state.get('pruning_results', {}),
-            'finetuning_results': workflow_state.get('finetuning_results', {}),
-            'evaluation_results': workflow_state.get('evaluation_results', {}),
-            'timestamp': self._get_timestamp(),
-            'success': True
-        }
-
-    def _check_convergence(self, iteration_results, threshold):
-        """Check if the pruning process has converged."""
-        
-        if len(iteration_results) < 2:
-            return False
-        
-        # Simple convergence check based on pruning ratio changes
-        last_ratio = iteration_results[-1].get('pruning', {}).get('compression_ratio', 0)
-        prev_ratio = iteration_results[-2].get('pruning', {}).get('compression_ratio', 0)
-        
-        change = abs(last_ratio - prev_ratio)
-        return change < threshold
-
-    def _get_timestamp(self):
-        """Get current timestamp."""
-        import datetime
-        return datetime.datetime.now().isoformat()
