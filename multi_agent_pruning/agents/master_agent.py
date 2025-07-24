@@ -15,6 +15,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 import numpy as np
 import logging
+from datetime import datetime
 
 from .base_agent import BaseAgent, AgentResponse
 
@@ -558,7 +559,6 @@ Your response must be a valid JSON object with strategic recommendations."""
         max_overall = safety_limits.get('max_overall_pruning', 0.8)
         if strategy.pruning_ratio > max_overall:
             logger.warning(f"⚠️ Pruning ratio {strategy.pruning_ratio:.1%} exceeds limit {max_overall:.1%}")
-            # FIXED: Use safety_margin instead of undefined safety_multiplier
             safety_margin = self.safety_margin  # Already defined in _initialize_agent_components
             strategy.pruning_ratio = max_overall * (1 - safety_margin)
             strategy.risk_level = 'high'
