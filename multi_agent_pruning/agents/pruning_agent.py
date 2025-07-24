@@ -139,9 +139,9 @@ class PruningAgent(BaseAgent):
                     f"Pruning execution failed: {str(e)}",
                     recovery_info=recovery_result
                 )
-
+    
     def _validate_input_state(self, state: PruningState) -> bool:
-        """Validate that the input state contains required analysis results with enhanced checking."""
+        """Validate that the input state contains required analysis results."""
         
         required_fields = ['model', 'analysis_results']
         
@@ -150,44 +150,21 @@ class PruningAgent(BaseAgent):
                 logger.error(f"❌ Missing required field in state: {field}")
                 return False
         
+        # Check analysis results structure
         analysis_results = state.analysis_results
         if not isinstance(analysis_results, dict):
             logger.error("❌ Analysis results must be a dictionary")
             return False
         
-        logger.info(f"🔍 Available analysis fields: {list(analysis_results.keys())}")
-        
-        # Check for strategic_recommendations with flexible structure handling
-        if 'strategic_recommendations' not in analysis_results:
-            logger.error("❌ Missing 'strategic_recommendations' in analysis results")
-            return False
-        
-        recommendations = analysis_results['strategic_recommendations']
-        
-        if isinstance(recommendations, str):
-            try:
-                import json
-                recommendations = json.loads(recommendations)
-                # Update the state with parsed recommendations
-                analysis_results['strategic_recommendations'] = recommendations
-                logger.info("✅ Parsed strategic_recommendations from JSON string")
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ Failed to parse strategic_recommendations JSON: {e}")
+        required_analysis_fields = ['strategic_recommendations']
+        for field in required_analysis_fields:
+            if field not in analysis_results:
+                logger.error(f"❌ Missing required analysis field: {field}")
                 return False
         
-        if not isinstance(recommendations, dict):
-            logger.error(f"❌ Strategic recommendations must be a dictionary, got: {type(recommendations)}")
-            return False
-        
-        # Check for required recommendation fields with fallbacks
-        required_recommendation_fields = ['importance_criterion', 'group_ratios', 'safety_measures']
-        for field in required_recommendation_fields:
-            if field not in recommendations:
-                logger.warning(f"⚠️ Missing recommendation field '{field}', will use defaults")
-        
-        logger.info("✅ Input state validation passed with enhanced checking")
+        logger.info("✅ Input state validation passed")
         return True
-
+    
     def _create_checkpoint(self, state: PruningState, checkpoint_name: str):
         """Create a checkpoint of the current model state."""
         
@@ -204,201 +181,136 @@ class PruningAgent(BaseAgent):
             self.checkpoints[checkpoint_name] = checkpoint
             
             logger.info(f"✅ Checkpoint '{checkpoint_name}' created successfully")
-
+    
     def _initialize_pruning_components(self, state: PruningState):
-        """Initialize pruning engine and importance criteria with enhanced error handling."""
+        """Initialize pruning engine and importance criteria."""
         
         with self.profiler.timer("pruning_components_initialization"):
             model = state.model
             model_name = getattr(state, 'model_name', 'unknown_model')
             
-            try:
-                # Get recommendations from analysis with safe access
-                analysis_results = state.analysis_results
-                recommendations = analysis_results['strategic_recommendations']
-                
-                importance_config = recommendations.get('importance_criterion', {})
-                
-                # Handle different possible structures for importance_criterion
-                if isinstance(importance_config, str):
-                    # If it's just a string, use it as primary criterion
-                    primary_criterion = importance_config
-                    fallback_criterion = 'l1norm'  # Default fallback
-                elif isinstance(importance_config, dict):
-                    primary_criterion = importance_config.get('primary_criterion', 'taylor')
-                    fallback_criterion = importance_config.get('fallback_criterion', 'l1norm')
-                else:
-                    # Default values if structure is unexpected
-                    logger.warning("⚠️ Unexpected importance_criterion structure, using defaults")
-                    primary_criterion = 'taylor'
-                    fallback_criterion = 'l1norm'
-                
-                # Initialize importance criteria with safe parameters
-                self.importance_criteria = ImportanceCriteria(
-                    criterion=primary_criterion,
-                    fallback_criterion=fallback_criterion
-                )
-                
-                # Initialize pruning engine
-                self.pruning_engine = PruningEngine(
-                    model=model,
-                    model_name=model_name,
-                    importance_criteria=self.importance_criteria
-                )
-                
-                logger.info(f"🔧 Pruning components initialized: {primary_criterion} -> {fallback_criterion}")
-                
-            except Exception as e:
-                logger.error(f"❌ Failed to initialize pruning components: {e}")
-                # Initialize with defaults as fallback
-                self.importance_criteria = ImportanceCriteria(
-                    criterion='taylor',
-                    fallback_criterion='l1norm'
-                )
-                self.pruning_engine = PruningEngine(
-                    model=model,
-                    model_name=model_name,
-                    importance_criteria=self.importance_criteria
-                )
-                logger.warning("⚠️ Initialized pruning components with default settings")
-
+            # Get recommendations from analysis
+            analysis_results = state.analysis_results
+            recommendations = analysis_results['strategic_recommendations']
+            
+            # Initialize importance criteria
+            importance_config = recommendations['importance_criterion']
+            self.importance_criteria = ImportanceCriteria(
+                criterion=importance_config['primary_criterion'],
+                fallback_criterion=importance_config['fallback_criterion']
+            )
+            
+            # Initialize pruning engine
+            self.pruning_engine = PruningEngine(
+                model=model,
+                model_name=model_name,
+                importance_criteria=self.importance_criteria
+            )
+            
+            logger.info("🔧 Pruning components initialized successfully")
+    
     def _execute_pruning_pipeline(self, state: PruningState) -> Dict[str, Any]:
-        """Execute the complete pruning pipeline with enhanced error handling."""
+        """Execute the complete pruning pipeline."""
         
         with self.profiler.timer("pruning_pipeline_execution"):
             logger.info("🔄 Executing pruning pipeline")
             
-            try:
-                # Get analysis recommendations with safe access
-                analysis_results = state.analysis_results
-                recommendations = analysis_results['strategic_recommendations']
-                
-                group_ratios = recommendations.get('group_ratios', {})
-                safety_measures = recommendations.get('safety_measures', {})
-                execution_strategy = recommendations.get('execution_strategy', {})
-                
-                # Handle case where group_ratios might be a string or have unexpected structure
-                if isinstance(group_ratios, str):
-                    try:
-                        import json
-                        group_ratios = json.loads(group_ratios)
-                    except json.JSONDecodeError:
-                        logger.warning("⚠️ Failed to parse group_ratios, using defaults")
-                        group_ratios = {'default': 0.5}
-                
-                if not isinstance(group_ratios, dict):
-                    logger.warning(f"⚠️ Unexpected group_ratios type: {type(group_ratios)}, using defaults")
-                    group_ratios = {'default': 0.5}
-                
-                # Phase 1: Compute importance scores
-                logger.info("📊 Phase 1: Computing importance scores")
-                importance_scores = self._compute_importance_scores(state)
-                
-                # Phase 2: Apply structured pruning
-                logger.info("✂️ Phase 2: Applying structured pruning")
-                pruning_results = self._apply_structured_pruning(
-                    state, importance_scores, group_ratios
-                )
-                
-                # Phase 3: Validate constraints
-                logger.info("🔍 Phase 3: Validating constraints")
-                constraint_validation = self._validate_constraints(state, pruning_results)
-                
-                # Phase 4: Compute final metrics
-                logger.info("📈 Phase 4: Computing final metrics")
-                final_metrics = self._compute_final_metrics(state, pruning_results)
-                
-                # Combine results
-                pipeline_results = {
-                    'success': True,
-                    'importance_scores': importance_scores,
-                    'pruning_results': pruning_results,
-                    'constraint_validation': constraint_validation,
-                    'final_metrics': final_metrics,
-                    'group_ratios_used': group_ratios,
-                    'safety_measures_applied': safety_measures
-                }
-                
-                logger.info("✅ Pruning pipeline executed successfully")
-                return pipeline_results
-                
-            except Exception as e:
-                logger.error(f"❌ Pruning pipeline execution failed: {e}")
-                return {
-                    'success': False,
-                    'error': str(e),
-                    'phase': 'pipeline_execution',
-                    'fallback_used': True
-                }
-
-def _compute_importance_scores(self, state: PruningState) -> Dict[str, Any]:
-    """Compute importance scores with enhanced error handling and precomputation usage."""
-    
-    with self.profiler.timer("importance_score_computation"):
-        logger.info("📊 Computing importance scores")
-        
-        try:
-            # Check for precomputed importance scores first (from earlier fixes)
-            if hasattr(state, '_precomputed_cache') and state._precomputed_cache:
-                cache = state._precomputed_cache
-                
-                # Get the criterion being used
-                criterion = getattr(self.importance_criteria, 'criterion', 'taylor')
-                
-                # Check if the requested criterion is already cached
-                if criterion in cache:
-                    logger.info(f"✅ Using precomputed {criterion} importance scores")
-                    return {
-                        'criterion_used': criterion,
-                        'scores': cache[criterion],
-                        'precomputed': True,
-                        'computation_time': 0.0
-                    }
-                
-                # Check for any available cached criterion as fallback
-                available_criteria = [key for key in cache.keys() if key in ['taylor', 'l1norm', 'l2norm', 'random']]
-                if available_criteria:
-                    fallback_criterion = available_criteria[0]
-                    logger.info(f"✅ Using precomputed {fallback_criterion} importance scores as fallback")
-                    return {
-                        'criterion_used': fallback_criterion,
-                        'scores': cache[fallback_criterion],
-                        'precomputed': True,
-                        'fallback_used': True,
-                        'computation_time': 0.0
-                    }
+            # Get analysis recommendations
+            analysis_results = state.analysis_results
+            recommendations = analysis_results['strategic_recommendations']
             
-            # Compute importance scores from scratch if not cached
-            logger.info("🔄 Computing importance scores from scratch")
+            # Phase 1: Compute importance scores
+            importance_results = self._compute_importance_scores(state, recommendations)
+            
+            # Phase 2: Apply structured pruning
+            pruning_execution_results = self._apply_structured_pruning(state, recommendations, importance_results)
+            
+            # Phase 3: Validate constraints
+            constraint_validation = self._validate_constraints(state, pruning_execution_results)
+            
+            # Phase 4: Compute final metrics
+            final_metrics = self._compute_final_metrics(state, pruning_execution_results)
+            
+            # Combine all results
+            pipeline_results = {
+                'importance_computation': importance_results,
+                'pruning_execution': pruning_execution_results,
+                'constraint_validation': constraint_validation,
+                'final_metrics': final_metrics,
+                'pruned_model': pruning_execution_results['pruned_model'],
+                'achieved_pruning_ratio': pruning_execution_results['achieved_pruning_ratio'],
+                'pipeline_success': constraint_validation['all_constraints_satisfied']
+            }
+            
+            logger.info("✅ Pruning pipeline execution completed")
+            return pipeline_results
+    
+    def _compute_importance_scores(self, state: PruningState, 
+                                 recommendations: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute importance scores for all prunable layers."""
+        
+        with self.profiler.timer("importance_computation"):
+            logger.info("📊 Computing importance scores")
             
             model = state.model
-            criterion = getattr(self.importance_criteria, 'criterion', 'taylor')
             
-            # Use the pruning engine to compute scores
-            scores = self.pruning_engine.compute_importance_scores(
-                model=model,
-                criterion=criterion,
-                dataloader=getattr(state, 'train_dataloader', None)
-            )
+            # Get importance criterion configuration
+            importance_config = recommendations['importance_criterion']
+            criterion = importance_config['primary_criterion']
             
-            return {
-                'criterion_used': criterion,
-                'scores': scores,
-                'precomputed': False,
-                'computation_time': self.profiler.get_last_duration("importance_score_computation")
-            }
+            # Prepare data for gradient-based criteria
+            data_loader = None
+            if criterion == 'taylor' and hasattr(state, 'dataloader'):
+                data_loader = state.dataloader
             
-        except Exception as e:
-            logger.error(f"❌ Importance score computation failed: {e}")
-            # Return empty scores as fallback
-            return {
-                'criterion_used': 'fallback',
-                'scores': {},
-                'precomputed': False,
-                'error': str(e),
-                'fallback_used': True
-            }
-
+            # Compute importance scores
+            try:
+                importance_scores = self.importance_criteria.compute_importance(
+                    model=model,
+                    criterion=criterion,
+                    data_loader=data_loader,
+                    num_samples=100  # Use subset for efficiency
+                )
+                
+                # Analyze importance distribution
+                score_analysis = self._analyze_importance_distribution(importance_scores)
+                
+                results = {
+                    'success': True,
+                    'criterion_used': criterion,
+                    'importance_scores': importance_scores,
+                    'score_analysis': score_analysis,
+                    'total_layers_analyzed': len(importance_scores)
+                }
+                
+                logger.info(f"✅ Importance scores computed for {len(importance_scores)} layers")
+                return results
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Primary criterion '{criterion}' failed: {str(e)}")
+                
+                # Fallback to secondary criterion
+                fallback_criterion = importance_config['fallback_criterion']
+                logger.info(f"🔄 Falling back to criterion: {fallback_criterion}")
+                
+                importance_scores = self.importance_criteria.compute_importance(
+                    model=model,
+                    criterion=fallback_criterion,
+                    data_loader=None  # Fallback criteria don't need data
+                )
+                
+                score_analysis = self._analyze_importance_distribution(importance_scores)
+                
+                return {
+                    'success': True,
+                    'criterion_used': fallback_criterion,
+                    'fallback_used': True,
+                    'fallback_reason': str(e),
+                    'importance_scores': importance_scores,
+                    'score_analysis': score_analysis,
+                    'total_layers_analyzed': len(importance_scores)
+                }
+    
     def _apply_structured_pruning(self, state: PruningState, recommendations: Dict[str, Any],
                                 importance_results: Dict[str, Any]) -> Dict[str, Any]:
         """Apply structured pruning based on importance scores and recommendations."""
