@@ -1,6 +1,6 @@
 """Version information for Multi-Agent LLM Pruning Framework."""
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __author__ = "Mahdi Banisharifdekordi"
 __email__ = "msharif@iastate.edu"
 __description__ = "Multi-Agent LLM Pruning Framework for Neural Network Compression"
@@ -10,7 +10,7 @@ __url__ = "https://github.com/BanisharifM/Multi-Agent-Pruning"
 VERSION_INFO = {
     'major': 0,
     'minor': 2, 
-    'patch': 0,
+    'patch': 1,
     'pre_release': None,
     'build': None
 }
