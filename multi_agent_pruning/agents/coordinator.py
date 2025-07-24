@@ -41,6 +41,7 @@ class AgentCoordinator:
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
+        self.logger = logging.getLogger(__name__)
         self.profiler = TimingProfiler()
         
         # Initialize all agents
@@ -52,7 +53,15 @@ class AgentCoordinator:
             'finetuning': FinetuningAgent(self.config.get('finetuning_agent', {})),
             'evaluation': EvaluationAgent(self.config.get('evaluation_agent', {}))
         }
-        
+
+        # Create individual agent references
+        self.profiling_agent = self.agents['profiling']
+        self.master_agent = self.agents['master']
+        self.analysis_agent = self.agents['analysis']
+        self.pruning_agent = self.agents['pruning']
+        self.finetuning_agent = self.agents['finetuning']
+        self.evaluation_agent = self.agents['evaluation']
+
         # Workflow state
         self.current_step = 0
         self.workflow_steps = [
