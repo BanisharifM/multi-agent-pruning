@@ -14,7 +14,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, AgentResponse
 from ..core.state_manager import PruningState
 from ..utils.profiler import TimingProfiler
 from ..utils.metrics import AccuracyTracker, compute_model_complexity
@@ -1337,3 +1337,190 @@ Please provide assessment in JSON format:
             'next_agent': None
         }
 
+    def get_agent_role(self) -> str:
+        """Return the role of this agent."""
+        return "evaluation_agent"
+    
+    def get_system_prompt(self, context: Dict[str, Any]) -> str:
+        """Generate system prompt for the evaluation agent."""
+        
+        model_info = context.get('model_info', {})
+        pruning_results = context.get('pruning_results', {})
+        finetuning_results = context.get('finetuning_results', {})
+        baseline_results = context.get('baseline_results', {})
+        
+        prompt = f"""You are an expert Evaluation Agent in a multi-agent neural network pruning system.
+
+ROLE: Conduct comprehensive evaluation and provide final assessment with publication-ready analysis.
+
+CURRENT CONTEXT:
+- Model: {model_info.get('name', 'Unknown')} ({model_info.get('total_params', 0):,} parameters)
+- Architecture: {model_info.get('architecture_type', 'Unknown')}
+- Final compression: {pruning_results.get('compression_ratio', 0.0)*100:.1f}%
+- Recovery achieved: {finetuning_results.get('accuracy_recovery', 0.0)*100:.1f}%
+
+PERFORMANCE METRICS:
+- Original accuracy: {baseline_results.get('original_accuracy', 0.0)*100:.1f}%
+- Final accuracy: {finetuning_results.get('final_accuracy', 0.0)*100:.1f}%
+- Accuracy drop: {(baseline_results.get('original_accuracy', 0.0) - finetuning_results.get('final_accuracy', 0.0))*100:.1f}%
+- Speedup achieved: {pruning_results.get('speedup', 1.0):.2f}x
+- Memory reduction: {pruning_results.get('memory_reduction', 0.0)*100:.1f}%
+
+EVALUATION RESPONSIBILITIES:
+1. Assess accuracy preservation and performance gains
+2. Compare against baseline pruning methods
+3. Validate paper reproduction requirements
+4. Analyze robustness and generalization
+5. Generate publication-ready results summary
+
+COMPARISON BASELINES:
+- Magnitude pruning: {baseline_results.get('magnitude_accuracy', 'N/A')}
+- Taylor pruning: {baseline_results.get('taylor_accuracy', 'N/A')}
+- Isomorphic pruning: {baseline_results.get('isomorphic_accuracy', 'N/A')}
+- Random pruning: {baseline_results.get('random_accuracy', 'N/A')}
+
+ASSESSMENT CRITERIA:
+- ACCURACY: Minimal degradation (<2% for good, <1% for excellent)
+- EFFICIENCY: Significant speedup (>1.5x good, >2x excellent)
+- COMPRESSION: Target ratio achieved with quality preservation
+- ROBUSTNESS: Consistent performance across test scenarios
+- REPRODUCIBILITY: Results match paper claims within variance
+
+DECISION FRAMEWORK:
+- COMPREHENSIVE: Evaluate all dimensions (accuracy, efficiency, robustness)
+- COMPARATIVE: Position results against established baselines
+- SCIENTIFIC: Provide statistical significance and confidence intervals
+- ACTIONABLE: Give clear recommendations for improvement
+
+Provide structured evaluation with clear metrics, comparisons, and final assessment."""
+        
+        return prompt
+    
+    def parse_llm_response(self, response: str, context: Dict[str, Any]) -> AgentResponse:
+        """Parse LLM response for evaluation decisions."""
+        
+        try:
+            # Extract key evaluation decisions from response
+            decisions = {}
+            
+            # Look for overall assessment
+            import re
+            
+            if 'excellent' in response.lower():
+                decisions['overall_rating'] = 'excellent'
+                decisions['rating_score'] = 5
+            elif 'good' in response.lower():
+                decisions['overall_rating'] = 'good'
+                decisions['rating_score'] = 4
+            elif 'satisfactory' in response.lower() or 'acceptable' in response.lower():
+                decisions['overall_rating'] = 'satisfactory'
+                decisions['rating_score'] = 3
+            elif 'poor' in response.lower():
+                decisions['overall_rating'] = 'poor'
+                decisions['rating_score'] = 2
+            else:
+                decisions['overall_rating'] = 'fair'
+                decisions['rating_score'] = 3
+            
+            # Extract accuracy assessment
+            if 'accuracy.*excellent' in response.lower() or 'minimal.*drop' in response.lower():
+                decisions['accuracy_assessment'] = 'excellent'
+            elif 'accuracy.*good' in response.lower() or 'acceptable.*drop' in response.lower():
+                decisions['accuracy_assessment'] = 'good'
+            elif 'accuracy.*poor' in response.lower() or 'significant.*drop' in response.lower():
+                decisions['accuracy_assessment'] = 'poor'
+            else:
+                decisions['accuracy_assessment'] = 'fair'
+            
+            # Extract efficiency assessment
+            if 'speedup.*excellent' in response.lower() or 'significant.*speedup' in response.lower():
+                decisions['efficiency_assessment'] = 'excellent'
+            elif 'speedup.*good' in response.lower() or 'moderate.*speedup' in response.lower():
+                decisions['efficiency_assessment'] = 'good'
+            elif 'speedup.*poor' in response.lower() or 'minimal.*speedup' in response.lower():
+                decisions['efficiency_assessment'] = 'poor'
+            else:
+                decisions['efficiency_assessment'] = 'fair'
+            
+            # Extract comparison with baselines
+            if 'outperform' in response.lower() or 'better.*than.*baseline' in response.lower():
+                decisions['baseline_comparison'] = 'superior'
+            elif 'comparable' in response.lower() or 'similar.*baseline' in response.lower():
+                decisions['baseline_comparison'] = 'comparable'
+            elif 'worse.*than.*baseline' in response.lower():
+                decisions['baseline_comparison'] = 'inferior'
+            else:
+                decisions['baseline_comparison'] = 'comparable'
+            
+            # Extract publication readiness
+            if 'publication.*ready' in response.lower() or 'ready.*publication' in response.lower():
+                decisions['publication_ready'] = True
+            elif 'not.*ready' in response.lower() or 'needs.*improvement' in response.lower():
+                decisions['publication_ready'] = False
+            else:
+                decisions['publication_ready'] = decisions['rating_score'] >= 4
+            
+            # Extract recommendations
+            recommendations = []
+            lines = response.split('\n')
+            for line in lines:
+                if any(keyword in line.lower() for keyword in ['recommend', 'suggest', 'improve', 'enhance']):
+                    recommendations.append(line.strip())
+            
+            decisions['recommendations'] = recommendations[:5]  # Keep top 5 recommendations
+            
+            # Extract key strengths and weaknesses
+            strengths = []
+            weaknesses = []
+            for line in lines:
+                if any(keyword in line.lower() for keyword in ['strength', 'advantage', 'benefit']):
+                    strengths.append(line.strip())
+                elif any(keyword in line.lower() for keyword in ['weakness', 'limitation', 'issue']):
+                    weaknesses.append(line.strip())
+            
+            decisions['strengths'] = strengths[:3]
+            decisions['weaknesses'] = weaknesses[:3]
+            
+            # Extract confidence level
+            if 'highly confident' in response.lower() or 'very confident' in response.lower():
+                confidence = 0.95
+            elif 'confident' in response.lower():
+                confidence = 0.85
+            elif 'moderately confident' in response.lower():
+                confidence = 0.70
+            elif 'uncertain' in response.lower() or 'unsure' in response.lower():
+                confidence = 0.50
+            else:
+                confidence = 0.75
+            
+            # Determine success based on content quality
+            success = (
+                len(decisions) >= 6 and 
+                'error' not in response.lower() and
+                decisions['rating_score'] > 0
+            )
+            
+            return AgentResponse(
+                success=success,
+                data=decisions,
+                message=f"Evaluation complete: {decisions['overall_rating']} ({decisions['rating_score']}/5), {decisions['baseline_comparison']} to baselines",
+                confidence=confidence
+            )
+            
+        except Exception as e:
+            return AgentResponse(
+                success=False,
+                data={
+                    'overall_rating': 'fair',
+                    'rating_score': 3,
+                    'accuracy_assessment': 'fair',
+                    'efficiency_assessment': 'fair',
+                    'baseline_comparison': 'comparable',
+                    'publication_ready': False,
+                    'recommendations': ['Conduct more thorough evaluation'],
+                    'strengths': ['Completed pruning process'],
+                    'weaknesses': ['Evaluation incomplete']
+                },
+                message=f"Failed to parse evaluation response, using neutral assessment: {str(e)}",
+                confidence=0.3
+            )
