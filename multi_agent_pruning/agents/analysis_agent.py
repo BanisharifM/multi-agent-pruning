@@ -121,7 +121,7 @@ class AnalysisAgent(BaseAgent):
     def _validate_input_state(self, state: PruningState) -> bool:
         """Validate that the input state contains required profiling results."""
         
-        required_fields = ['model', 'profiling_results', 'master_results']
+        required_fields = ['model', 'profile_results', 'master_results']
         
         for field in required_fields:
             if not hasattr(state, field) or getattr(state, field) is None:
@@ -129,7 +129,7 @@ class AnalysisAgent(BaseAgent):
                 return False
         
         # Check profiling results structure
-        profiling_results = state.profiling_results
+        profiling_results = state.profile_results
         if not isinstance(profiling_results, dict):
             logger.error("❌ Profiling results must be a dictionary")
             return False
@@ -142,7 +142,7 @@ class AnalysisAgent(BaseAgent):
         
         logger.info("✅ Input state validation passed")
         return True
-    
+
     def _initialize_analyzers(self, state: PruningState):
         """Initialize dependency and isomorphic analyzers."""
         
@@ -162,70 +162,53 @@ class AnalysisAgent(BaseAgent):
         """Perform comprehensive analysis of the model and profiling results."""
         
         with self.profiler.timer("comprehensive_analysis"):
-            logger.info("📊 Performing comprehensive analysis")
+            logger.info("🔍 Performing comprehensive analysis")
             
-            analysis = {
+            profiling_results = state.profile_results
+            model_analysis = profiling_results['model_analysis']
+            
+            analysis_results = {
+                'model_info': model_analysis,
                 'architecture_analysis': self._analyze_architecture(state),
                 'dependency_analysis': self._analyze_dependencies(state),
-                'constraint_analysis': self._analyze_constraints(state),
-                'performance_analysis': self._analyze_performance(state),
-                'safety_analysis': self._analyze_safety_constraints(state)
+                'isomorphic_analysis': self._analyze_isomorphic_groups(state),
+                'sensitivity_analysis': self._analyze_sensitivity(state),
+                'pruning_opportunities': self._identify_pruning_opportunities(state)
             }
             
             logger.info("✅ Comprehensive analysis completed")
-            return analysis
-    
+            return analysis_results
+
     def _analyze_architecture(self, state: PruningState) -> Dict[str, Any]:
-        """Analyze model architecture and characteristics."""
+        """Analyze model architecture for pruning insights."""
         
-        profiling_results = state.profiling_results
-        model_analysis = profiling_results['model_analysis']
-        
-        # Extract architecture information
-        architecture_info = {
-            'model_type': model_analysis.get('architecture_type', 'unknown'),
-            'total_parameters': model_analysis.get('total_parameters', 0),
-            'total_layers': model_analysis.get('total_layers', 0),
-            'model_size_mb': model_analysis.get('model_size_mb', 0),
-            'estimated_macs': model_analysis.get('estimated_macs', 0)
-        }
-        
-        # Analyze layer distribution
+        profiling_results = state.profile_results
         layer_analysis = profiling_results['layer_analysis']
-        layer_distribution = {}
         
-        for layer_name, layer_info in layer_analysis.items():
-            layer_type = layer_info.get('layer_type', 'unknown')
-            if layer_type not in layer_distribution:
-                layer_distribution[layer_type] = {
-                    'count': 0,
-                    'total_params': 0,
-                    'layers': []
-                }
-            
-            layer_distribution[layer_type]['count'] += 1
-            layer_distribution[layer_type]['total_params'] += layer_info.get('parameters', 0)
-            layer_distribution[layer_type]['layers'].append(layer_name)
+        # Extract architecture insights
+        total_layers = len(layer_analysis)
+        prunable_layers = sum(1 for layer in layer_analysis.values() if layer.get('prunable', False))
         
-        # Identify critical layers
-        critical_layers = []
-        for layer_name, layer_info in layer_analysis.items():
-            param_ratio = layer_info.get('parameters', 0) / architecture_info['total_parameters']
-            if param_ratio > 0.05:  # Layers with >5% of total parameters
-                critical_layers.append({
-                    'name': layer_name,
-                    'parameters': layer_info.get('parameters', 0),
-                    'param_ratio': param_ratio,
-                    'layer_type': layer_info.get('layer_type', 'unknown')
-                })
+        # Analyze layer types
+        layer_types = {}
+        for layer_info in layer_analysis.values():
+            layer_type = layer_info.get('type', 'unknown')
+            layer_types[layer_type] = layer_types.get(layer_type, 0) + 1
+        
+        # Calculate complexity metrics
+        total_params = sum(layer.get('parameters', 0) for layer in layer_analysis.values())
+        total_flops = sum(layer.get('flops', 0) for layer in layer_analysis.values())
         
         return {
-            'architecture_info': architecture_info,
-            'layer_distribution': layer_distribution,
-            'critical_layers': critical_layers,
-            'pruning_potential': self._assess_pruning_potential(architecture_info, layer_distribution)
+            'total_layers': total_layers,
+            'prunable_layers': prunable_layers,
+            'pruning_ratio': prunable_layers / total_layers if total_layers > 0 else 0,
+            'layer_types': layer_types,
+            'total_parameters': total_params,
+            'total_flops': total_flops,
+            'architecture_complexity': self._assess_architecture_complexity(layer_types, total_layers)
         }
-    
+
     def _analyze_dependencies(self, state: PruningState) -> Dict[str, Any]:
         """Analyze layer dependencies and coupling constraints."""
         
@@ -433,51 +416,39 @@ class AnalysisAgent(BaseAgent):
     
     def _generate_strategic_recommendations(self, state: PruningState, 
                                           analysis_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate strategic recommendations based on analysis results."""
+        """Generate strategic pruning recommendations based on analysis."""
         
         with self.profiler.timer("strategic_recommendations"):
-            logger.info("🎯 Generating strategic recommendations")
+            logger.info("💡 Generating strategic recommendations")
             
-            # Get master agent recommendations as baseline
+            profiling_results = state.profile_results
+            model_analysis = profiling_results['model_analysis']
+            
+            # Get master agent directives
             master_results = state.master_results
-            recommended_strategy = master_results.get('recommended_strategy', {})
-            
-            # Analyze architecture-specific recommendations
-            arch_analysis = analysis_results['architecture_analysis']
-            architecture_type = arch_analysis['architecture_info']['model_type']
-            
-            # Generate importance criterion recommendation
-            importance_recommendation = self._recommend_importance_criterion(
-                state, analysis_results
-            )
-            
-            # Generate group ratio recommendations
-            group_ratio_recommendation = self._recommend_group_ratios(
-                state, analysis_results, recommended_strategy
-            )
-            
-            # Generate pruning strategy recommendations
-            strategy_recommendation = self._recommend_pruning_strategy(
-                state, analysis_results
-            )
-            
-            # Generate safety recommendations
-            safety_recommendation = self._recommend_safety_measures(
-                state, analysis_results
-            )
+            master_directives = master_results.get('directives', {})
             
             recommendations = {
-                'importance_criterion': importance_recommendation,
-                'group_ratios': group_ratio_recommendation,
-                'pruning_strategy': strategy_recommendation,
-                'safety_measures': safety_recommendation,
-                'execution_plan': self._create_execution_plan(state, analysis_results),
-                'confidence_score': self._calculate_confidence_score(analysis_results)
+                'importance_criterion': self._recommend_importance_criterion(
+                    model_analysis, analysis_results, master_directives
+                ),
+                'pruning_ratios': self._recommend_pruning_ratios(
+                    analysis_results, master_directives
+                ),
+                'group_multipliers': self._recommend_group_multipliers(
+                    analysis_results
+                ),
+                'safety_constraints': self._recommend_safety_constraints(
+                    analysis_results, state
+                ),
+                'execution_strategy': self._recommend_execution_strategy(
+                    analysis_results, master_directives
+                )
             }
             
             logger.info("✅ Strategic recommendations generated")
             return recommendations
-    
+
     def _recommend_importance_criterion(self, state: PruningState, 
                                       analysis_results: Dict[str, Any]) -> Dict[str, Any]:
         """Recommend the best importance criterion based on analysis."""
