@@ -66,6 +66,24 @@ class AnalysisAgent(BaseAgent):
         
         logger.info("🔍 Analysis Agent components initialized with configuration")
 
+    def _get_target_pruning_ratio(self, state: PruningState) -> float:
+        """Safely get target pruning ratio from master results or use default."""
+        
+        # Try to get from master results first
+        if hasattr(state, 'master_results') and state.master_results:
+            master_directives = state.master_results.get('directives', {})
+            if 'pruning_ratio' in master_directives:
+                return master_directives['pruning_ratio']
+            
+            # Try alternative field names
+            recommended_strategy = state.master_results.get('recommended_strategy', {})
+            if 'pruning_ratio' in recommended_strategy:
+                return recommended_strategy['pruning_ratio']
+        
+        # Default fallback
+        logger.warning("⚠️ Target pruning ratio not found in master results, using default 0.5")
+        return 0.5
+
     def execute(self, state: PruningState) -> Dict[str, Any]:
         """
         Execute analysis phase: analyze profiling results and generate recommendations.
@@ -898,7 +916,7 @@ class AnalysisAgent(BaseAgent):
         
         # Extract constraint information
         constraints = {
-            'target_pruning_ratio': state.target_pruning_ratio,
+            'target_pruning_ratio': self._get_target_pruning_ratio(state),
             'dataset': getattr(state, 'dataset', 'unknown'),
             'safety_limits': master_results.get('safety_limits', {}),
             'architectural_constraints': []
@@ -943,7 +961,7 @@ class AnalysisAgent(BaseAgent):
         model_analysis = profiling_results['model_analysis']
         
         # Estimate performance gains
-        target_ratio = state.target_pruning_ratio
+        target_ratio = self._get_target_pruning_ratio(state)
         
         # Conservative estimates based on typical pruning results
         estimated_speedup = 1.0 + (target_ratio * 0.5)  # 50% of pruning ratio as speedup
@@ -1010,7 +1028,7 @@ class AnalysisAgent(BaseAgent):
         
         # Check for safety violations
         if 'mlp_multiplier' in recommended_strategy:
-            mlp_ratio = recommended_strategy['mlp_multiplier'] * state.target_pruning_ratio
+            mlp_ratio = recommended_strategy['mlp_multiplier'] * self._get_target_pruning_ratio(state)
             if mlp_ratio > safety_thresholds['maximum_mlp_pruning']:
                 current_config_safety['violations'].append(
                     f"MLP pruning ratio {mlp_ratio:.1%} exceeds safety limit {safety_thresholds['maximum_mlp_pruning']:.1%}"
@@ -1018,7 +1036,7 @@ class AnalysisAgent(BaseAgent):
                 current_config_safety['is_safe'] = False
         
         if 'qkv_multiplier' in recommended_strategy:
-            attn_ratio = recommended_strategy['qkv_multiplier'] * state.target_pruning_ratio
+            attn_ratio = recommended_strategy['qkv_multiplier'] * self._get_target_pruning_ratio(state)
             if attn_ratio > safety_thresholds['maximum_attention_pruning']:
                 current_config_safety['violations'].append(
                     f"Attention pruning ratio {attn_ratio:.1%} exceeds safety limit {safety_thresholds['maximum_attention_pruning']:.1%}"
@@ -1123,7 +1141,7 @@ class AnalysisAgent(BaseAgent):
         safety_thresholds = safety_analysis['safety_thresholds']
         
         # Apply safety constraints
-        target_ratio = state.target_pruning_ratio
+        target_ratio = self._get_target_pruning_ratio(state)
         
         if 'mlp_multiplier' in recommended_ratios:
             max_safe_mlp = safety_thresholds['maximum_mlp_pruning'] / target_ratio
@@ -1301,7 +1319,7 @@ class AnalysisAgent(BaseAgent):
         
         # Extract key information
         model_name = getattr(state, 'model_name', 'unknown')
-        target_ratio = state.target_pruning_ratio
+        target_ratio = self._get_target_pruning_ratio(state)
         dataset = getattr(state, 'dataset', 'unknown')
         
         arch_info = analysis_results['architecture_analysis']['architecture_info']
@@ -1416,7 +1434,7 @@ Please provide your analysis in JSON format with the following structure:
     def _assess_constraint_risk(self, constraints: Dict[str, Any], state: PruningState) -> str:
         """Assess the risk level of constraint violations."""
         
-        target_ratio = state.target_pruning_ratio
+        target_ratio = self._get_target_pruning_ratio(state)
         safety_limits = constraints.get('safety_limits', {})
         
         # Check if target ratio is within safe limits
