@@ -24,6 +24,12 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  
+except ImportError:
+    pass  
+
 @dataclass
 class AgentResponse:
     """Structured response from an LLM agent."""
@@ -58,29 +64,44 @@ class BaseAgent(ABC):
     and uses LLM reasoning to make intelligent decisions.
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        self.config = config or {}
+    def __init__(self, agent_name: str, llm_client=None, profiler=None):
+        """
+        Initialize the base agent.
         
-        # LLM configuration
-        self.llm_model = self.config.get('llm_model', 'gpt-4o-mini')
-        self.temperature = self.config.get('temperature', 0.1)
-        self.max_tokens = self.config.get('max_tokens', 2000)
-        self.max_retries = self.config.get('max_retries', 3)
+        Args:
+            agent_name: Name/type of the agent
+            llm_client: LLM client for reasoning (optional)
+            profiler: Performance profiler (optional)
+        """
+        self.agent_name = agent_name
+        self.llm_client = llm_client
+        self.profiler = profiler
+        self.logger = logging.getLogger(f"{__name__}.{agent_name}")
         
-        # Agent identity
-        self.agent_name = self.__class__.__name__
-        self.agent_role = self.get_agent_role()
+        # Initialize LLM client if not provided
+        if self.llm_client is None:
+            try:
+                from openai import OpenAI
+                self.llm_client = OpenAI()
+                self.llm_model = "gpt-4o-mini"  # Default model
+            except ImportError:
+                self.logger.warning("OpenAI client not available, LLM features disabled")
+                self.llm_client = None
+                self.llm_model = None
+        else:
+            self.llm_model = "gpt-4o-mini"  # Default model
         
-        # Safety and constraints
-        self.safety_multiplier = self.config.get('safety_multiplier', 0.8)
-        self.enable_safety_checks = self.config.get('enable_safety_checks', True)
+        # Initialize profiler if not provided
+        if self.profiler is None:
+            try:
+                from ..utils.profiler import TimingProfiler
+                self.profiler = TimingProfiler()
+            except ImportError:
+                self.logger.warning("Profiler not available")
+                self.profiler = None
         
-        # Logging and tracing
-        self.conversation_history = []
-        self.reasoning_traces = []
-        
-        logger.info(f"🤖 {self.agent_name} initialized with model {self.llm_model}")
-    
+        self.logger.info(f"🤖 {agent_name} initialized with model {self.llm_model}")
+
     @abstractmethod
     def get_agent_role(self) -> str:
         """Return the role description for this agent."""
