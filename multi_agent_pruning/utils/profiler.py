@@ -40,6 +40,32 @@ class TimingProfiler:
         
         logger.info(f"⏱️ TimingProfiler initialized (enabled: {enabled})")
     
+    def get_summary(self, top_n: int = 10) -> Dict[str, Any]:
+        """
+        Get timing summary as a dictionary (instead of printing).
+        
+        Args:
+            top_n: Number of top consumers to include
+            
+        Returns:
+            Dictionary with timing summary
+        """
+        
+        if not self.enabled:
+            return {'enabled': False, 'message': 'Profiler is disabled'}
+        
+        stats = self.get_statistics()
+        top_consumers = self.get_top_consumers(top_n)
+        
+        summary = {
+            'enabled': True,
+            'overall_statistics': stats.get('_summary', {}),
+            'top_consumers': top_consumers,
+            'all_timers': {k: v for k, v in stats.items() if k != '_summary'}
+        }
+        
+        return summary
+
     @contextmanager
     def timer(self, name: str, metadata: Optional[Dict[str, Any]] = None):
         """
