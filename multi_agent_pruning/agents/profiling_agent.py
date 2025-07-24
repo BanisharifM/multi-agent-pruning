@@ -8,9 +8,6 @@ Enhanced version of the user's profiling agent with:
 - More efficient LLM usage
 - Better error handling
 
-FIXES APPLIED:
-- Fix 2: Agent Interface Standardization (proper BaseAgent inheritance)
-- Fix 3: Configuration Propagation System
 """
 
 import torch
@@ -92,7 +89,6 @@ class ProfilingAgent(BaseAgent):
     5. Comprehensive profiling with timing
     """
     
-    # UPDATED CONSTRUCTOR - Fix 2: Agent Interface Standardization
     def __init__(self, config: Optional[Dict[str, Any]] = None, llm_client=None, profiler=None):
         """
         Initialize ProfilingAgent with proper BaseAgent inheritance.
@@ -121,32 +117,55 @@ class ProfilingAgent(BaseAgent):
         
         logger.info("📊 Profiling Agent initialized with proper inheritance")
     
-    # UPDATED METHOD - Fix 3: Configuration Propagation System
+# DELETE
+    # def _initialize_profiling_components(self):
+    #     """Initialize profiling-specific components based on configuration."""
+        
+    #     # Initialize dependency analyzer
+    #     dependency_config = self.config.get('dependency_analysis', {})
+    #     if dependency_config.get('enabled', True):
+    #         self.dependency_analyzer = DependencyAnalyzer(
+    #             cache_enabled=dependency_config.get('cache_enabled', True),
+    #             cache_dir=dependency_config.get('cache_dir', './cache/dependencies')
+    #         )
+        
+    #     # Initialize isomorphic analyzer
+    #     isomorphic_config = self.config.get('isomorphic_analysis', {})
+    #     if isomorphic_config.get('enabled', True):
+    #         self.isomorphic_analyzer = IsomorphicAnalyzer(
+    #             similarity_threshold=isomorphic_config.get('similarity_threshold', 0.95),
+    #             cache_enabled=isomorphic_config.get('cache_enabled', True)
+    #         )
+        
+    #     # Configure profiling behavior
+    #     profiling_config = self.config.get('profiling', {})
+    #     self.enable_detailed_profiling = profiling_config.get('detailed', True)
+    #     self.enable_memory_profiling = profiling_config.get('memory', True)
+    #     self.enable_flops_counting = profiling_config.get('flops', True)
+    
     def _initialize_profiling_components(self):
         """Initialize profiling-specific components based on configuration."""
         
-        # Initialize dependency analyzer
-        dependency_config = self.config.get('dependency_analysis', {})
-        if dependency_config.get('enabled', True):
-            self.dependency_analyzer = DependencyAnalyzer(
-                cache_enabled=dependency_config.get('cache_enabled', True),
-                cache_dir=dependency_config.get('cache_dir', './cache/dependencies')
-            )
+        # Initialize analyzers as None - will be created when needed with proper parameters
+        self.dependency_analyzer = None
+        self.isomorphic_analyzer = None
         
-        # Initialize isomorphic analyzer
-        isomorphic_config = self.config.get('isomorphic_analysis', {})
-        if isomorphic_config.get('enabled', True):
-            self.isomorphic_analyzer = IsomorphicAnalyzer(
-                similarity_threshold=isomorphic_config.get('similarity_threshold', 0.95),
-                cache_enabled=isomorphic_config.get('cache_enabled', True)
-            )
+        # Initialize caching
+        self.profile_cache = {}
+        self.enable_caching = self.config.get('enable_caching', True)
         
         # Configure profiling behavior
         profiling_config = self.config.get('profiling', {})
         self.enable_detailed_profiling = profiling_config.get('detailed', True)
         self.enable_memory_profiling = profiling_config.get('memory', True)
         self.enable_flops_counting = profiling_config.get('flops', True)
-    
+        
+        # Store analyzer configurations for later use
+        self.dependency_config = self.config.get('dependency_analysis', {})
+        self.isomorphic_config = self.config.get('isomorphic_analysis', {})
+        
+        logger.info("📊 Profiling Agent components initialized with configuration")
+        
     def get_agent_role(self) -> str:
         """Return the role description for this agent."""
         return """Expert model profiler specializing in neural network architecture analysis, 
@@ -183,7 +202,6 @@ SAFETY REQUIREMENTS:
 
 Your analysis should be thorough but concise, focusing on actionable insights for the pruning workflow."""
     
-    # UPDATED METHOD - Fix 2: Agent Interface Standardization (handle both state and context)
     def execute(self, input_data) -> Dict[str, Any]:
         """Execute profiling with precomputation and caching."""
         

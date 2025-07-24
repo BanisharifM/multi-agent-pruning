@@ -7,12 +7,6 @@ START → Profiling Agent → Master Agent → Analysis Agent → Pruning Agent 
 This coordinator manages the sequential execution of agents and handles
 the flow of information between them.
 
-FIXES APPLIED:
-- Fix 1: Coordinator State Management Unification
-- Fix 3: Configuration Propagation System  
-- Fix 4: Safety Configuration Enforcement
-- Fix 5: Precomputation Activation
-- Fix 6: Error Handling and Diagnostics
 """
 
 import os
