@@ -28,19 +28,52 @@ class PruningAgent(BaseAgent):
     Applies safety checks, constraint validation, and creates checkpoints.
     """
     
-    def __init__(self, llm_client=None, profiler: Optional[TimingProfiler] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, llm_client=None, profiler=None):
+        """
+        Initialize PruningAgent with proper BaseAgent inheritance.
+        """
+        # Call BaseAgent constructor with proper parameters
         super().__init__("PruningAgent", llm_client, profiler)
         
-        # Pruning components
+        # Store configuration
+        self.config = config or {}
+        
+        # Initialize agent-specific components
+        self._initialize_agent_components()
+        
+        logger.info("✂️ Pruning Agent initialized with proper inheritance")
+    
+    def _initialize_agent_components(self):
+        """Initialize agent-specific components based on configuration."""
+        
+        # Pruning components - will be initialized when needed
         self.pruning_engine: Optional[PruningEngine] = None
         self.importance_criteria: Optional[ImportanceCriteria] = None
         
-        # Pruning results
+        # Pruning configuration
+        pruning_config = self.config.get('pruning', {})
+        self.enable_safety_checks = pruning_config.get('safety_checks', True)
+        self.enable_checkpointing = pruning_config.get('checkpointing', True)
+        self.validate_constraints = pruning_config.get('validate_constraints', True)
+        
+        # Safety configuration
+        safety_config = self.config.get('safety', {})
+        self.max_layer_pruning = safety_config.get('max_layer_pruning', 0.8)
+        self.min_accuracy_threshold = safety_config.get('min_accuracy_threshold', 0.3)
+        self.safety_margin = safety_config.get('safety_margin', 0.05)
+        
+        # Execution configuration
+        execution_config = self.config.get('execution', {})
+        self.dry_run_mode = execution_config.get('dry_run', False)
+        self.verbose_logging = execution_config.get('verbose', True)
+        self.backup_model = execution_config.get('backup_model', True)
+        
+        # Results storage
         self.pruning_results = {}
         self.checkpoints = {}
         
-        logger.info("✂️ Pruning Agent initialized")
-    
+        logger.info("✂️ Pruning Agent components initialized with configuration")
+
     def execute(self, state: PruningState) -> Dict[str, Any]:
         """
         Execute pruning phase: apply structured pruning with safety checks.

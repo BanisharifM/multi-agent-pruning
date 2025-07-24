@@ -27,17 +27,56 @@ class EvaluationAgent(BaseAgent):
     including performance metrics, efficiency gains, and comparison analysis.
     """
     
-    def __init__(self, llm_client=None, profiler: Optional[TimingProfiler] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, llm_client=None, profiler=None):
+        """
+        Initialize EvaluationAgent with proper BaseAgent inheritance.
+        """
+        # Call BaseAgent constructor with proper parameters
         super().__init__("EvaluationAgent", llm_client, profiler)
         
-        # Evaluation components
+        # Store configuration
+        self.config = config or {}
+        
+        # Initialize agent-specific components
+        self._initialize_agent_components()
+        
+        logger.info("📊 Evaluation Agent initialized with proper inheritance")
+    
+    def _initialize_agent_components(self):
+        """Initialize agent-specific components based on configuration."""
+        
+        # Evaluation components - will be initialized when needed
         self.accuracy_tracker: Optional[AccuracyTracker] = None
         
-        # Evaluation results
+        # Evaluation configuration
+        evaluation_config = self.config.get('evaluation', {})
+        self.enable_accuracy_evaluation = evaluation_config.get('accuracy_evaluation', True)
+        self.enable_efficiency_evaluation = evaluation_config.get('efficiency_evaluation', True)
+        self.enable_comparison_analysis = evaluation_config.get('comparison_analysis', True)
+        
+        # Metrics configuration
+        metrics_config = self.config.get('metrics', {})
+        self.compute_macs = metrics_config.get('compute_macs', True)
+        self.compute_flops = metrics_config.get('compute_flops', True)
+        self.compute_memory_usage = metrics_config.get('memory_usage', True)
+        self.compute_inference_time = metrics_config.get('inference_time', True)
+        
+        # Comparison configuration
+        comparison_config = self.config.get('comparison', {})
+        self.baseline_methods = comparison_config.get('baseline_methods', ['magnitude', 'random'])
+        self.enable_statistical_tests = comparison_config.get('statistical_tests', False)
+        
+        # Reporting configuration
+        reporting_config = self.config.get('reporting', {})
+        self.detailed_report = reporting_config.get('detailed', True)
+        self.include_visualizations = reporting_config.get('visualizations', False)
+        self.export_results = reporting_config.get('export', True)
+        
+        # Results storage
         self.evaluation_results = {}
         self.comparison_results = {}
         
-        logger.info("📊 Evaluation Agent initialized")
+        logger.info("📊 Evaluation Agent components initialized with configuration")
     
     def execute(self, state: PruningState) -> Dict[str, Any]:
         """
