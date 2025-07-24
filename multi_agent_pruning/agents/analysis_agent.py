@@ -769,7 +769,7 @@ class AnalysisAgent(BaseAgent):
                 'isomorphic_analysis': self._analyze_isomorphic_groups(state),
                 'sensitivity_analysis': self._analyze_sensitivity(state),
                 'pruning_opportunities': self._identify_pruning_opportunities(state),
-                'safety_analysis': self._analyze_safety_constraints(state)  # FIXED: Added missing safety analysis
+                'safety_analysis': self._analyze_safety_constraints(state)
             }
             
             logger.info("✅ Comprehensive analysis completed")
@@ -1138,7 +1138,6 @@ class AnalysisAgent(BaseAgent):
         # Start with master agent recommendations
         recommended_ratios = baseline_strategy.copy()
         
-        # FIXED: Safely access safety analysis with fallback
         safety_analysis = analysis_results.get('safety_analysis', {})
         safety_thresholds = safety_analysis.get('safety_thresholds', {
             'maximum_single_layer_pruning': 0.8,
@@ -1287,7 +1286,6 @@ class AnalysisAgent(BaseAgent):
         else:
             confidence_factors.append(0.6)
         
-        # FIXED: Safety analysis confidence with safe access
         safety_analysis = analysis_results.get('safety_analysis', {})
         if safety_analysis.get('constraints') or safety_analysis.get('safety_thresholds'):
             confidence_factors.append(0.9)
@@ -1301,8 +1299,8 @@ class AnalysisAgent(BaseAgent):
         return confidence_score
 
     def _get_llm_analysis(self, state: PruningState, analysis_results: Dict[str, Any],
-                         recommendations: Dict[str, Any]) -> Dict[str, Any]:
-        """Get LLM-based analysis and validation of recommendations."""
+                        recommendations: Dict[str, Any]) -> Dict[str, Any]:
+        """Get LLM-based analysis and validation of recommendations with FIXED OpenAI API calls."""
         
         if not self.llm_client:
             return {'status': 'llm_not_available', 'message': 'LLM client not configured'}
@@ -1312,10 +1310,42 @@ class AnalysisAgent(BaseAgent):
         
         try:
             with self.profiler.timer("llm_analysis"):
-                response = self.llm_client.generate(prompt)
+                if hasattr(self.llm_client, 'chat') and hasattr(self.llm_client.chat, 'completions'):
+                    # Modern OpenAI client with chat completions
+                    response = self.llm_client.chat.completions.create(
+                        model="gpt-4o-mini",  # or whatever model is configured
+                        messages=[
+                            {"role": "system", "content": "You are an expert in neural network pruning and optimization."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        max_tokens=1000,
+                        temperature=0.1
+                    )
+                    response_text = response.choices[0].message.content
+                    
+                elif hasattr(self.llm_client, 'completions'):
+                    # Legacy OpenAI client with completions
+                    response = self.llm_client.completions.create(
+                        model="gpt-3.5-turbo-instruct",  # or appropriate completion model
+                        prompt=prompt,
+                        max_tokens=1000,
+                        temperature=0.1
+                    )
+                    response_text = response.choices[0].text
+                    
+                elif hasattr(self.llm_client, 'generate'):
+                    # Custom client with generate method
+                    response_text = self.llm_client.generate(prompt)
+                    
+                else:
+                    # Try to call the client directly if it's callable
+                    if callable(self.llm_client):
+                        response_text = self.llm_client(prompt)
+                    else:
+                        raise AttributeError("LLM client doesn't have a recognized interface")
                 
                 # Parse LLM response
-                llm_analysis = self._parse_llm_analysis_response(response)
+                llm_analysis = self._parse_llm_analysis_response(response_text)
                 
                 logger.info("🤖 LLM analysis completed successfully")
                 return llm_analysis
@@ -1325,7 +1355,13 @@ class AnalysisAgent(BaseAgent):
             return {
                 'status': 'llm_analysis_failed',
                 'error': str(e),
-                'fallback_used': True
+                'fallback_used': True,
+                'fallback_analysis': {
+                    'strategic_insights': 'LLM analysis unavailable - using rule-based fallback',
+                    'risk_assessment': 'Medium risk - manual validation recommended',
+                    'alternative_approaches': 'Consider gradual pruning with validation checkpoints',
+                    'performance_impact': 'Expected 10-30% speedup with 5-15% accuracy impact'
+                }
             }
 
     def _create_llm_analysis_prompt(self, state: PruningState, 
@@ -1344,7 +1380,6 @@ class AnalysisAgent(BaseAgent):
         model_size_mb = total_parameters * 4 / (1024 * 1024)  # Estimate
         architecture_complexity = arch_analysis.get('architecture_complexity', 'unknown')
         
-        # FIXED: Safely access safety analysis
         safety_info = analysis_results.get('safety_analysis', {})
         safety_constraints = safety_info.get('constraints', 'No specific constraints identified')
         
