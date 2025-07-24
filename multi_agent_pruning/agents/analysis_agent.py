@@ -25,19 +25,46 @@ class AnalysisAgent(BaseAgent):
     pruning recommendations based on model architecture and constraints.
     """
     
-    def __init__(self, llm_client=None, profiler: Optional[TimingProfiler] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, llm_client=None, profiler=None):
+        """
+        Initialize AnalysisAgent with proper BaseAgent inheritance.
+        """
+        # Call BaseAgent constructor with proper parameters
         super().__init__("AnalysisAgent", llm_client, profiler)
         
-        # Analysis components
+        # Store configuration
+        self.config = config or {}
+        
+        # Initialize agent-specific components
+        self._initialize_agent_components()
+        
+        logger.info("🔍 Analysis Agent initialized with proper inheritance")
+    
+    def _initialize_agent_components(self):
+        """Initialize agent-specific components based on configuration."""
+        
+        # Analysis components - will be initialized when needed
         self.dependency_analyzer: Optional[DependencyAnalyzer] = None
         self.isomorphic_analyzer: Optional[IsomorphicAnalyzer] = None
         
-        # Analysis results
+        # Analysis configuration
+        analysis_config = self.config.get('analysis', {})
+        self.enable_dependency_analysis = analysis_config.get('dependency_analysis', True)
+        self.enable_isomorphic_analysis = analysis_config.get('isomorphic_analysis', True)
+        self.enable_sensitivity_analysis = analysis_config.get('sensitivity_analysis', True)
+        
+        # Recommendation configuration
+        recommendation_config = self.config.get('recommendations', {})
+        self.default_importance_criterion = recommendation_config.get('default_importance', 'taylor')
+        self.safety_margin = recommendation_config.get('safety_margin', 0.1)
+        self.conservative_mode = recommendation_config.get('conservative_mode', True)
+        
+        # Analysis results storage
         self.analysis_results = {}
         self.recommendations = {}
         
-        logger.info("🔍 Analysis Agent initialized")
-    
+        logger.info("🔍 Analysis Agent components initialized with configuration")
+
     def execute(self, state: PruningState) -> Dict[str, Any]:
         """
         Execute analysis phase: analyze profiling results and generate recommendations.

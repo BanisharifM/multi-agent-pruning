@@ -66,22 +66,44 @@ class MasterAgent(BaseAgent):
     5. More efficient LLM usage with structured reasoning
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        super().__init__(config)
+    def __init__(self, config: Optional[Dict[str, Any]] = None, llm_client=None, profiler=None):
+        """
+        Initialize MasterAgent with proper BaseAgent inheritance.
+        """
+        # Call BaseAgent constructor with proper parameters
+        super().__init__("MasterAgent", llm_client, profiler)
         
-        # Strategy optimization
-        self.max_iterations = config.get('max_iterations', 5)
-        self.convergence_threshold = config.get('convergence_threshold', 0.005)  # 0.5% accuracy
-        self.target_tolerance = config.get('target_tolerance', 0.01)  # 1% parameter reduction tolerance
+        # Store configuration
+        self.config = config or {}
         
-        # Exploration strategy
-        self.exploration_strategies = ['conservative', 'moderate', 'aggressive']
-        self.current_strategy = 'conservative'
+        # Initialize agent-specific components
+        self._initialize_agent_components()
+        
+        logger.info("🧠 Master Agent initialized with proper inheritance")
+    
+    def _initialize_agent_components(self):
+        """Initialize agent-specific components based on configuration."""
+        
+        # Strategy optimization settings
+        strategy_config = self.config.get('strategy_optimization', {})
+        self.max_iterations = strategy_config.get('max_iterations', 5)
+        self.convergence_threshold = strategy_config.get('convergence_threshold', 0.005)  # 0.5% accuracy
+        self.target_tolerance = strategy_config.get('target_tolerance', 0.01)  # 1% parameter reduction tolerance
+        
+        # Exploration strategy settings
+        exploration_config = self.config.get('exploration', {})
+        self.exploration_strategies = exploration_config.get('strategies', ['conservative', 'moderate', 'aggressive'])
+        self.current_strategy = exploration_config.get('initial_strategy', 'conservative')
         
         # History analysis
         self.history_analyzer = HistoryAnalyzer()
         
-        logger.info("🧠 Enhanced Master Agent initialized")
+        # Risk assessment settings
+        risk_config = self.config.get('risk_assessment', {})
+        self.risk_tolerance = risk_config.get('tolerance', 'medium')
+        self.safety_margin = risk_config.get('safety_margin', 0.05)
+        
+        logger.info(f"🧠 Master Agent components initialized with {len(self.exploration_strategies)} strategies")
     
     def get_agent_role(self) -> str:
         """Return the role description for this agent."""

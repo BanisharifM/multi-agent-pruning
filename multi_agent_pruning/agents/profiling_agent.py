@@ -1,5 +1,5 @@
 """
-Optimized Profiling Agent for Multi-Agent LLM Pruning
+Optimized Profiling Agent for Multi-Agent LLM Pruning - UPDATED VERSION
 
 Enhanced version of the user's profiling agent with:
 - Precomputed dependency analysis
@@ -7,6 +7,7 @@ Enhanced version of the user's profiling agent with:
 - Improved safety constraints
 - More efficient LLM usage
 - Better error handling
+
 """
 
 import torch
@@ -88,20 +89,83 @@ class ProfilingAgent(BaseAgent):
     5. Comprehensive profiling with timing
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        super().__init__(config)
+    def __init__(self, config: Optional[Dict[str, Any]] = None, llm_client=None, profiler=None):
+        """
+        Initialize ProfilingAgent with proper BaseAgent inheritance.
         
-        # Profiling components
+        CHANGES MADE:
+        - Added llm_client and profiler parameters to match BaseAgent signature
+        - Call super().__init__ with proper parameters
+        - Initialize agent-specific components in separate method
+        """
+        # Call BaseAgent constructor with proper parameters
+        super().__init__("ProfilingAgent", llm_client, profiler)
+        
+        # Store configuration
+        self.config = config or {}
+        
+        # Initialize profiling-specific components
+        self._initialize_profiling_components()
+        
+        # Initialize analyzers
         self.dependency_analyzer = None
         self.isomorphic_analyzer = None
-        self.timing_profiler = TimingProfiler()
         
-        # Caching
+        # Initialize caching
         self.profile_cache = {}
-        self.enable_caching = config.get('enable_caching', True)
+        self.enable_caching = self.config.get('enable_caching', True)
         
-        logger.info("🔍 Enhanced Profiling Agent initialized")
+        logger.info("📊 Profiling Agent initialized with proper inheritance")
     
+# DELETE
+    # def _initialize_profiling_components(self):
+    #     """Initialize profiling-specific components based on configuration."""
+        
+    #     # Initialize dependency analyzer
+    #     dependency_config = self.config.get('dependency_analysis', {})
+    #     if dependency_config.get('enabled', True):
+    #         self.dependency_analyzer = DependencyAnalyzer(
+    #             cache_enabled=dependency_config.get('cache_enabled', True),
+    #             cache_dir=dependency_config.get('cache_dir', './cache/dependencies')
+    #         )
+        
+    #     # Initialize isomorphic analyzer
+    #     isomorphic_config = self.config.get('isomorphic_analysis', {})
+    #     if isomorphic_config.get('enabled', True):
+    #         self.isomorphic_analyzer = IsomorphicAnalyzer(
+    #             similarity_threshold=isomorphic_config.get('similarity_threshold', 0.95),
+    #             cache_enabled=isomorphic_config.get('cache_enabled', True)
+    #         )
+        
+    #     # Configure profiling behavior
+    #     profiling_config = self.config.get('profiling', {})
+    #     self.enable_detailed_profiling = profiling_config.get('detailed', True)
+    #     self.enable_memory_profiling = profiling_config.get('memory', True)
+    #     self.enable_flops_counting = profiling_config.get('flops', True)
+    
+    def _initialize_profiling_components(self):
+        """Initialize profiling-specific components based on configuration."""
+        
+        # Initialize analyzers as None - will be created when needed with proper parameters
+        self.dependency_analyzer = None
+        self.isomorphic_analyzer = None
+        
+        # Initialize caching
+        self.profile_cache = {}
+        self.enable_caching = self.config.get('enable_caching', True)
+        
+        # Configure profiling behavior
+        profiling_config = self.config.get('profiling', {})
+        self.enable_detailed_profiling = profiling_config.get('detailed', True)
+        self.enable_memory_profiling = profiling_config.get('memory', True)
+        self.enable_flops_counting = profiling_config.get('flops', True)
+        
+        # Store analyzer configurations for later use
+        self.dependency_config = self.config.get('dependency_analysis', {})
+        self.isomorphic_config = self.config.get('isomorphic_analysis', {})
+        
+        logger.info("📊 Profiling Agent components initialized with configuration")
+        
     def get_agent_role(self) -> str:
         """Return the role description for this agent."""
         return """Expert model profiler specializing in neural network architecture analysis, 
@@ -138,12 +202,33 @@ SAFETY REQUIREMENTS:
 
 Your analysis should be thorough but concise, focusing on actionable insights for the pruning workflow."""
     
-    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    def execute(self, input_data) -> Dict[str, Any]:
         """Execute profiling with precomputation and caching."""
         
-        model = input_data.get('model')
-        model_name = input_data.get('model_name', 'unknown')
-        dataset = input_data.get('dataset', 'unknown')
+        # Handle both PruningState objects and dictionary contexts
+        if hasattr(input_data, 'model'):
+            # It's a PruningState object
+            model = input_data.model
+            model_name = input_data.model_name
+            dataset = input_data.dataset
+            context = {
+                'input_size': getattr(input_data, 'input_size', 224),
+                'num_classes': getattr(input_data, 'num_classes', 1000),
+                'target_ratio': getattr(input_data, 'target_ratio', 0.5)
+            }
+        else:
+            # It's a dictionary context
+            model = input_data.get('model')
+            model_name = input_data.get('model_name', 'unknown')
+            dataset = input_data.get('dataset', 'unknown')
+            context = input_data
+        
+        if model is None:
+            return {
+                'success': False,
+                'error': 'No model provided for profiling',
+                'agent_name': self.agent_name
+            }
         
         # Check cache first
         cache_key = f"{model_name}_{dataset}"
@@ -152,7 +237,7 @@ Your analysis should be thorough but concise, focusing on actionable insights fo
             cached_profile = self.profile_cache[cache_key]
             
             # Still run LLM analysis for context-specific insights
-            llm_analysis = self._run_llm_analysis(cached_profile.to_dict(), input_data)
+            llm_analysis = self._run_llm_analysis(cached_profile.to_dict(), context)
             
             return {
                 'success': True,
@@ -166,15 +251,15 @@ Your analysis should be thorough but concise, focusing on actionable insights fo
         # Run full profiling
         logger.info(f"🔍 Running full profiling for {model_name}")
         
-        with self.timing_profiler.timer("full_profiling"):
-            profile = self._run_comprehensive_profiling(model, model_name, dataset, input_data)
+        with self.profiler.timer("full_profiling"):
+            profile = self._run_comprehensive_profiling(model, model_name, dataset, context)
         
         # Cache the profile
         if self.enable_caching:
             self.profile_cache[cache_key] = profile
         
         # Run LLM analysis
-        llm_analysis = self._run_llm_analysis(profile.to_dict(), input_data)
+        llm_analysis = self._run_llm_analysis(profile.to_dict(), context)
         
         return {
             'success': True,
@@ -182,7 +267,7 @@ Your analysis should be thorough but concise, focusing on actionable insights fo
             'profile': profile.to_dict(),
             'llm_analysis': llm_analysis,
             'cached': False,
-            'timing': self.timing_profiler.get_summary()
+            'timing': self.profiler.get_summary() if hasattr(self.profiler, 'get_summary') else {}
         }
     
     def _run_comprehensive_profiling(self, model: nn.Module, model_name: str, 
@@ -190,35 +275,35 @@ Your analysis should be thorough but concise, focusing on actionable insights fo
         """Run comprehensive model profiling with all analyses."""
         
         # Basic model analysis
-        with self.timing_profiler.timer("basic_analysis"):
+        with self.profiler.timer("basic_analysis"):
             total_params = sum(p.numel() for p in model.parameters())
             total_macs = compute_macs(model, (1, 3, context.get('input_size', 224), context.get('input_size', 224)))
             architecture_type = self._detect_architecture_type(model, model_name)
         
         # Layer analysis
-        with self.timing_profiler.timer("layer_analysis"):
+        with self.profiler.timer("layer_analysis"):
             layer_info = self._analyze_layers(model, architecture_type)
         
         # Dependency analysis
-        with self.timing_profiler.timer("dependency_analysis"):
+        with self.profiler.timer("dependency_analysis"):
             if self.dependency_analyzer is None:
                 self.dependency_analyzer = DependencyAnalyzer(model)
             dependency_graph = self.dependency_analyzer.get_dependency_graph()
             coupling_constraints = self.dependency_analyzer.get_coupling_constraints()
         
         # Isomorphic analysis
-        with self.timing_profiler.timer("isomorphic_analysis"):
+        with self.profiler.timer("isomorphic_analysis"):
             if self.isomorphic_analyzer is None:
                 self.isomorphic_analyzer = IsomorphicAnalyzer(model)
             isomorphic_groups = self.isomorphic_analyzer.create_isomorphic_groups(0.5)  # Default ratio
         
         # Safety analysis
-        with self.timing_profiler.timer("safety_analysis"):
+        with self.profiler.timer("safety_analysis"):
             safety_limits = self._compute_safety_limits(architecture_type, dataset)
             recommended_ratios = self._compute_recommended_ratios(architecture_type, dataset)
         
         # Performance analysis
-        with self.timing_profiler.timer("performance_analysis"):
+        with self.profiler.timer("performance_analysis"):
             memory_usage = self._estimate_memory_usage(model)
             inference_time = self._estimate_inference_time(model, context.get('input_size', 224))
         
@@ -506,4 +591,3 @@ Based on this computed analysis, provide strategic insights for the pruning work
             timestamp=context.get('timestamp', ''),
             agent_name=self.agent_name
         )
-

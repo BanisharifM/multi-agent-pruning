@@ -28,19 +28,65 @@ class FinetuningAgent(BaseAgent):
     strategic fine-tuning with adaptive learning rates and early stopping.
     """
     
-    def __init__(self, llm_client=None, profiler: Optional[TimingProfiler] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, llm_client=None, profiler=None):
+        """
+        Initialize FinetuningAgent with proper BaseAgent inheritance.
+        """
+        # Call BaseAgent constructor with proper parameters
         super().__init__("FinetuningAgent", llm_client, profiler)
         
-        # Fine-tuning components
+        # Store configuration
+        self.config = config or {}
+        
+        # Initialize agent-specific components
+        self._initialize_agent_components()
+        
+        logger.info("🎯 Fine-tuning Agent initialized with proper inheritance")
+    
+    def _initialize_agent_components(self):
+        """Initialize agent-specific components based on configuration."""
+        
+        # Fine-tuning components - will be initialized when needed
         self.optimizer: Optional[optim.Optimizer] = None
         self.scheduler: Optional[optim.lr_scheduler._LRScheduler] = None
         self.accuracy_tracker: Optional[AccuracyTracker] = None
         
-        # Fine-tuning results
+        # Training configuration
+        training_config = self.config.get('training', {})
+        self.epochs = training_config.get('epochs', 50)
+        self.learning_rate = training_config.get('learning_rate', 1e-4)
+        self.weight_decay = training_config.get('weight_decay', 1e-4)
+        self.batch_size = training_config.get('batch_size', 32)
+        
+        # Optimization configuration
+        optimizer_config = self.config.get('optimizer', {})
+        self.optimizer_type = optimizer_config.get('type', 'adamw')
+        self.momentum = optimizer_config.get('momentum', 0.9)
+        self.beta1 = optimizer_config.get('beta1', 0.9)
+        self.beta2 = optimizer_config.get('beta2', 0.999)
+        
+        # Scheduler configuration
+        scheduler_config = self.config.get('scheduler', {})
+        self.scheduler_type = scheduler_config.get('type', 'cosine')
+        self.warmup_epochs = scheduler_config.get('warmup_epochs', 5)
+        self.min_lr = scheduler_config.get('min_lr', 1e-6)
+        
+        # Early stopping configuration
+        early_stopping_config = self.config.get('early_stopping', {})
+        self.enable_early_stopping = early_stopping_config.get('enabled', True)
+        self.patience = early_stopping_config.get('patience', 10)
+        self.min_delta = early_stopping_config.get('min_delta', 0.001)
+        
+        # Validation configuration
+        validation_config = self.config.get('validation', {})
+        self.validation_frequency = validation_config.get('frequency', 1)  # Every epoch
+        self.save_best_model = validation_config.get('save_best', True)
+        
+        # Results storage
         self.finetuning_results = {}
         self.training_history = []
         
-        logger.info("🎯 Fine-tuning Agent initialized")
+        logger.info("🎯 Fine-tuning Agent components initialized with configuration")
     
     def execute(self, state: PruningState) -> Dict[str, Any]:
         """

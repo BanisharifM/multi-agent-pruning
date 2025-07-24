@@ -1,10 +1,10 @@
 Metadata-Version: 2.4
 Name: multi-agent-pruning
-Version: 0.1.0
+Version: 0.2.0
 Summary: Multi-Agent LLM Pruning Framework for Neural Network Compression
-Home-page: https://github.com/example/multi-agent-pruning
-Author: Multi-Agent Pruning Research Team
-Author-email: research@example.com
+Home-page: https://github.com/BanisharifM/Multi-Agent-Pruning
+Author: Mahdi Banisharifdekordi
+Author-email: msharif@iastate.edu
 Classifier: Development Status :: 4 - Beta
 Classifier: Intended Audience :: Developers
 Classifier: Intended Audience :: Science/Research
