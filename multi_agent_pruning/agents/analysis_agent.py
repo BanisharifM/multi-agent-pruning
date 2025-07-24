@@ -768,7 +768,8 @@ class AnalysisAgent(BaseAgent):
                 'dependency_analysis': self._analyze_dependencies(state),
                 'isomorphic_analysis': self._analyze_isomorphic_groups(state),
                 'sensitivity_analysis': self._analyze_sensitivity(state),
-                'pruning_opportunities': self._identify_pruning_opportunities(state)
+                'pruning_opportunities': self._identify_pruning_opportunities(state),
+                'safety_analysis': self._analyze_safety_constraints(state)  # FIXED: Added missing safety analysis
             }
             
             logger.info("✅ Comprehensive analysis completed")
@@ -1129,44 +1130,49 @@ class AnalysisAgent(BaseAgent):
             'data_requirements': 'gradient' if primary_criterion == 'taylor' else 'none'
         }
 
-    def _recommend_group_ratios(self, state: PruningState, analysis_results: Dict[str, Any],
-                              baseline_strategy: Dict[str, Any]) -> Dict[str, Any]:
-        """Recommend group ratio multipliers based on analysis."""
+    def _recommend_group_ratios(self, state: PruningState, 
+                            analysis_results: Dict[str, Any],
+                            baseline_strategy: Dict[str, float]) -> Dict[str, float]:
+        """Recommend group-specific pruning ratios with FIXED safety analysis access."""
         
         # Start with master agent recommendations
         recommended_ratios = baseline_strategy.copy()
         
-        # Adjust based on safety analysis
-        safety_analysis = analysis_results['safety_analysis']
-        safety_thresholds = safety_analysis['safety_thresholds']
+        # FIXED: Safely access safety analysis with fallback
+        safety_analysis = analysis_results.get('safety_analysis', {})
+        safety_thresholds = safety_analysis.get('safety_thresholds', {
+            'maximum_single_layer_pruning': 0.8,
+            'minimum_accuracy_threshold': 0.1,
+            'critical_layer_protection': True
+        })
         
         # Apply safety constraints
         target_ratio = self._get_target_pruning_ratio(state)
         
-        if 'mlp_multiplier' in recommended_ratios:
-            max_safe_mlp = safety_thresholds['maximum_mlp_pruning'] / target_ratio
-            recommended_ratios['mlp_multiplier'] = min(
-                recommended_ratios['mlp_multiplier'], 
-                max_safe_mlp
-            )
+        # Get architecture analysis for layer-specific adjustments
+        arch_analysis = analysis_results.get('architecture_analysis', {})
+        layer_types = arch_analysis.get('layer_types', {})
         
-        if 'qkv_multiplier' in recommended_ratios:
-            max_safe_attn = safety_thresholds['maximum_attention_pruning'] / target_ratio
-            recommended_ratios['qkv_multiplier'] = min(
-                recommended_ratios['qkv_multiplier'], 
-                max_safe_attn
-            )
+        # Adjust ratios based on layer types and safety constraints
+        max_single_layer = safety_thresholds.get('maximum_single_layer_pruning', 0.8)
         
-        # Ensure projection and head layers are protected
-        recommended_ratios['proj_multiplier'] = 0.0
-        recommended_ratios['head_multiplier'] = 0.0
+        for layer_group, ratio in recommended_ratios.items():
+            # Apply safety cap
+            if ratio > max_single_layer:
+                recommended_ratios[layer_group] = max_single_layer
+                logger.warning(f"⚠️ Capped {layer_group} pruning ratio from {ratio:.3f} to {max_single_layer:.3f} for safety")
+            
+            # Layer-type specific adjustments
+            if 'attention' in layer_group.lower():
+                # Be more conservative with attention layers
+                recommended_ratios[layer_group] = min(ratio * 0.8, max_single_layer)
+            elif 'mlp' in layer_group.lower() or 'linear' in layer_group.lower():
+                # MLPs can typically handle more aggressive pruning
+                recommended_ratios[layer_group] = min(ratio * 1.1, max_single_layer)
         
-        return {
-            'recommended_ratios': recommended_ratios,
-            'safety_adjustments_applied': True,
-            'rationale': 'Ratios adjusted to comply with safety thresholds while maintaining effectiveness'
-        }
-    
+        logger.info(f"✅ Recommended group ratios with safety constraints: {recommended_ratios}")
+        return recommended_ratios
+
     def _recommend_pruning_strategy(self, state: PruningState, 
                                   analysis_results: Dict[str, Any]) -> Dict[str, Any]:
         """Recommend overall pruning strategy."""
@@ -1255,11 +1261,11 @@ class AnalysisAgent(BaseAgent):
         }
 
     def _calculate_confidence_score(self, analysis_results: Dict[str, Any]) -> float:
-        """Calculate confidence score for analysis results with FIXED architecture access."""
+        """Calculate confidence score for analysis results with FIXED safety analysis access."""
         
         confidence_factors = []
         
-        # Architecture analysis confidence - FIXED: Use actual returned structure
+        # Architecture analysis confidence
         arch_analysis = analysis_results['architecture_analysis']
         architecture_complexity = arch_analysis.get('architecture_complexity', 'unknown')
         if architecture_complexity != 'unknown':
@@ -1281,9 +1287,9 @@ class AnalysisAgent(BaseAgent):
         else:
             confidence_factors.append(0.6)
         
-        # Safety analysis confidence
-        safety_analysis = analysis_results['safety_analysis']
-        if safety_analysis.get('constraints'):
+        # FIXED: Safety analysis confidence with safe access
+        safety_analysis = analysis_results.get('safety_analysis', {})
+        if safety_analysis.get('constraints') or safety_analysis.get('safety_thresholds'):
             confidence_factors.append(0.9)
         else:
             confidence_factors.append(0.7)
@@ -1321,23 +1327,26 @@ class AnalysisAgent(BaseAgent):
                 'error': str(e),
                 'fallback_used': True
             }
+
     def _create_llm_analysis_prompt(self, state: PruningState, 
                                 analysis_results: Dict[str, Any], 
                                 recommendations: Dict[str, Any]) -> str:
-        """Create LLM analysis prompt with FIXED architecture data access."""
+        """Create LLM analysis prompt with FIXED safety analysis access."""
         
         model_name = getattr(state, 'model_name', 'unknown')
         target_ratio = self._get_target_pruning_ratio(state)
         dataset = getattr(state, 'dataset', 'unknown')
         
-        # FIXED: Extract architecture information safely from actual keys
+        # Extract architecture information safely from actual keys
         arch_analysis = analysis_results['architecture_analysis']
         model_type = getattr(state, 'model_name', 'unknown')
         total_parameters = arch_analysis.get('total_parameters', 0)
         model_size_mb = total_parameters * 4 / (1024 * 1024)  # Estimate
         architecture_complexity = arch_analysis.get('architecture_complexity', 'unknown')
         
-        safety_info = analysis_results['safety_analysis']
+        # FIXED: Safely access safety analysis
+        safety_info = analysis_results.get('safety_analysis', {})
+        safety_constraints = safety_info.get('constraints', 'No specific constraints identified')
         
         prompt = f"""
     You are an expert in neural network pruning and optimization. Analyze the following pruning scenario and provide strategic insights.
@@ -1357,7 +1366,7 @@ class AnalysisAgent(BaseAgent):
     - Layer Types: {arch_analysis.get('layer_types', {})}
 
     ## Safety Constraints:
-    {safety_info.get('constraints', 'No specific constraints identified')}
+    {safety_constraints}
 
     ## Current Recommendations:
     - Importance Criterion: {recommendations.get('importance_criterion', 'Not specified')}
