@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, List, Tuple
 import json
 from datetime import datetime
 
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, AgentResponse
 from ..core.state_manager import PruningState
 from ..core.dependency_analyzer import DependencyAnalyzer
 from ..core.isomorphic_analyzer import IsomorphicAnalyzer
@@ -831,3 +831,148 @@ Please provide your analysis in JSON format with the following structure:
             'next_agent': None
         }
 
+    def get_agent_role(self) -> str:
+        """Return the role of this agent."""
+        return "analysis_agent"
+    
+    def get_system_prompt(self, context: Dict[str, Any]) -> str:
+        """Generate system prompt for the analysis agent."""
+        
+        model_info = context.get('model_info', {})
+        profiling_results = context.get('profiling_results', {})
+        pruning_config = context.get('pruning_config', {})
+        history = context.get('history', [])
+        
+        prompt = f"""You are an expert Analysis Agent in a multi-agent neural network pruning system.
+
+ROLE: Analyze profiling results and recommend optimal pruning strategies with intelligent parameter tuning.
+
+CURRENT CONTEXT:
+- Model: {model_info.get('name', 'Unknown')} ({model_info.get('total_params', 0):,} parameters)
+- Architecture: {model_info.get('architecture_type', 'Unknown')}
+- Target: {pruning_config.get('target_ratio', 0.5)*100:.1f}% compression
+- Current iteration: {len(history) + 1}
+
+PROFILING INSIGHTS:
+- Layer dependencies: {len(profiling_results.get('dependencies', []))} detected
+- Coupled layers: {len(profiling_results.get('coupled_layers', []))} groups
+- Pruning opportunities: {profiling_results.get('pruning_potential', 'Unknown')}
+- Architecture complexity: {profiling_results.get('complexity', 'Unknown')}
+
+ANALYSIS RESPONSIBILITIES:
+1. Select optimal importance criterion (magnitude, Taylor, gradient-based)
+2. Recommend pruning ratios for different layer types
+3. Tune exploration parameters based on model characteristics
+4. Validate strategy against safety constraints
+5. Learn from previous iteration outcomes
+
+DECISION FRAMEWORK:
+- DATA-DRIVEN: Use profiling results to guide decisions
+- ADAPTIVE: Adjust strategy based on model architecture and history
+- SAFE: Ensure recommendations respect safety constraints
+- EFFICIENT: Balance accuracy preservation with compression goals
+
+IMPORTANCE CRITERIA SELECTION:
+- Magnitude: Fast, works well for over-parameterized models
+- Taylor: More accurate, requires gradients, good for fine-tuned models
+- Gradient-based: Most accurate, computationally expensive, best for critical layers
+
+Provide structured analysis with clear rationale for each recommendation."""
+        
+        return prompt
+    
+    def parse_llm_response(self, response: str, context: Dict[str, Any]) -> AgentResponse:
+        """Parse LLM response for analysis decisions."""
+        
+        try:
+            # Extract key analysis decisions from response
+            decisions = {}
+            
+            # Look for importance criterion recommendation
+            import re
+            
+            if 'taylor' in response.lower():
+                decisions['importance_criterion'] = 'taylor'
+            elif 'gradient' in response.lower():
+                decisions['importance_criterion'] = 'gradient'
+            elif 'magnitude' in response.lower():
+                decisions['importance_criterion'] = 'magnitude'
+            else:
+                decisions['importance_criterion'] = 'magnitude'  # default
+            
+            # Extract recommended pruning ratios
+            mlp_ratio_match = re.search(r'mlp.*?(\d+\.?\d*)%', response.lower())
+            if mlp_ratio_match:
+                decisions['recommended_mlp_ratio'] = float(mlp_ratio_match.group(1)) / 100.0
+            else:
+                decisions['recommended_mlp_ratio'] = 0.10  # default 10%
+            
+            attn_ratio_match = re.search(r'attention.*?(\d+\.?\d*)%', response.lower())
+            if attn_ratio_match:
+                decisions['recommended_attention_ratio'] = float(attn_ratio_match.group(1)) / 100.0
+            else:
+                decisions['recommended_attention_ratio'] = 0.05  # default 5%
+            
+            # Extract exploration strategy
+            if 'aggressive' in response.lower():
+                decisions['exploration_strategy'] = 'aggressive'
+                decisions['round_to_values'] = [0.25, 0.5, 0.75]
+            elif 'conservative' in response.lower():
+                decisions['exploration_strategy'] = 'conservative'
+                decisions['round_to_values'] = [0.1, 0.2, 0.3, 0.4, 0.5]
+            else:
+                decisions['exploration_strategy'] = 'balanced'
+                decisions['round_to_values'] = [0.2, 0.4, 0.6, 0.8]
+            
+            # Extract group ratio multipliers
+            multiplier_match = re.search(r'multiplier.*?(\d+\.?\d*)', response.lower())
+            if multiplier_match:
+                decisions['group_ratio_multipliers'] = [1.0, float(multiplier_match.group(1)), 2.0]
+            else:
+                decisions['group_ratio_multipliers'] = [1.0, 1.5, 2.0]  # default
+            
+            # Extract confidence and rationale
+            if 'confident' in response.lower() or 'certain' in response.lower():
+                confidence = 0.9
+            elif 'uncertain' in response.lower() or 'unsure' in response.lower():
+                confidence = 0.5
+            else:
+                confidence = 0.7
+            
+            # Extract key rationale points
+            rationale = []
+            lines = response.split('\n')
+            for line in lines:
+                if any(keyword in line.lower() for keyword in ['because', 'since', 'due to', 'reason']):
+                    rationale.append(line.strip())
+            
+            decisions['rationale'] = rationale[:3]  # Keep top 3 reasons
+            
+            # Determine success based on content quality
+            success = (
+                len(decisions) >= 4 and 
+                'error' not in response.lower() and
+                decisions['importance_criterion'] in ['magnitude', 'taylor', 'gradient']
+            )
+            
+            return AgentResponse(
+                success=success,
+                data=decisions,
+                message=f"Analysis complete: {decisions['importance_criterion']} criterion, {decisions['exploration_strategy']} strategy",
+                confidence=confidence
+            )
+            
+        except Exception as e:
+            return AgentResponse(
+                success=False,
+                data={
+                    'importance_criterion': 'magnitude',  # safe fallback
+                    'recommended_mlp_ratio': 0.10,
+                    'recommended_attention_ratio': 0.05,
+                    'exploration_strategy': 'conservative',
+                    'round_to_values': [0.1, 0.2, 0.3, 0.4, 0.5],
+                    'group_ratio_multipliers': [1.0, 1.5, 2.0]
+                },
+                message=f"Failed to parse analysis response, using safe defaults: {str(e)}",
+                confidence=0.3
+            )

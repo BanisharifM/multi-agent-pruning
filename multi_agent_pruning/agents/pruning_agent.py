@@ -13,13 +13,12 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, AgentResponse
 from ..core.state_manager import PruningState
 from ..core.pruning_engine import PruningEngine
 from ..core.importance_criteria import ImportanceCriteria
 from ..utils.profiler import TimingProfiler
 from ..utils.metrics import compute_model_complexity
-from .base_agent import BaseAgent, AgentResponse
 
 logger = logging.getLogger(__name__)
 
