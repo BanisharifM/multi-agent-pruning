@@ -256,17 +256,25 @@ class AgentCoordinator:
         else:
             logger.info("✅ All precomputation data available")
 
+
     def _get_precomputation_status(self, state: PruningState) -> Dict[str, bool]:
-        """Get status of precomputation data."""
+        """Get status of precomputation data with correct key matching."""
         
-        if not hasattr(state, '_precomputed_cache'):
-            return {}
+        if not hasattr(state, '_precomputed_cache') or not state._precomputed_cache:
+            return {
+                'model_analysis': False,
+                'dependency_analysis': False,
+                'importance_scores': False,
+                'dataset_stats': False
+            }
+        
+        cache = state._precomputed_cache
         
         return {
-            'model_analysis': 'model_analysis' in state._precomputed_cache,
-            'dependency_analysis': 'dependency_analysis' in state._precomputed_cache,
-            'importance_scores': 'importance_scores' in state._precomputed_cache,
-            'dataset_stats': 'dataset_stats' in state._precomputed_cache
+            'model_analysis': 'model_analysis' in cache,
+            'dependency_analysis': 'dependencies' in cache,
+            'importance_scores': any(key.startswith('importance_') for key in cache.keys()),
+            'dataset_stats': 'dataset_stats' in cache
         }
 
     def _validate_workflow_state(self, state: PruningState) -> Tuple[bool, List[str]]:
