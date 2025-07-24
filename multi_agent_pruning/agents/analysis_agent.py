@@ -1076,26 +1076,33 @@ class AnalysisAgent(BaseAgent):
             logger.info("✅ Strategic recommendations generated")
             return recommendations
 
-    def _recommend_importance_criterion(self, state: PruningState, 
-                                      analysis_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Recommend the best importance criterion based on analysis."""
+    def _get_detailed_importance_recommendations(self, state: PruningState, 
+                                               analysis_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Get detailed importance criterion recommendations with rationale."""
         
-        arch_analysis = analysis_results['architecture_analysis']
-        architecture_type = arch_analysis['architecture_info']['model_type']
+        # Get basic recommendation first
+        model_analysis = self._get_profiling_data(state, 'model_analysis')
+        master_results = getattr(state, 'master_results', {})
+        master_directives = master_results.get('directives', {})
         
-        # Architecture-specific recommendations
-        if 'vit' in architecture_type.lower() or 'transformer' in architecture_type.lower():
-            primary_criterion = 'taylor'
-            fallback_criterion = 'magnitude_l2'
+        primary_criterion = self._recommend_importance_criterion(
+            model_analysis, analysis_results, master_directives
+        )
+        
+        # Add detailed analysis
+        arch_analysis = analysis_results.get('architecture_analysis', {})
+        architecture_type = arch_analysis.get('architecture_complexity', 'unknown')
+        
+        # Determine fallback and rationale
+        if primary_criterion == 'taylor':
+            fallback_criterion = 'l2norm'
             rationale = "Taylor criterion works well for transformer architectures with gradient information"
-        elif 'resnet' in architecture_type.lower() or 'conv' in architecture_type.lower():
-            primary_criterion = 'magnitude_l1'
+        elif primary_criterion == 'l1norm':
             fallback_criterion = 'taylor'
             rationale = "L1 magnitude is effective for convolutional architectures"
         else:
-            primary_criterion = 'magnitude_l2'
-            fallback_criterion = 'taylor'
-            rationale = "L2 magnitude as safe default for unknown architectures"
+            fallback_criterion = 'l2norm'
+            rationale = "Default criterion for general architectures"
         
         return {
             'primary_criterion': primary_criterion,
@@ -1103,7 +1110,7 @@ class AnalysisAgent(BaseAgent):
             'rationale': rationale,
             'data_requirements': 'gradient' if primary_criterion == 'taylor' else 'none'
         }
-    
+
     def _recommend_group_ratios(self, state: PruningState, analysis_results: Dict[str, Any],
                               baseline_strategy: Dict[str, Any]) -> Dict[str, Any]:
         """Recommend group ratio multipliers based on analysis."""
