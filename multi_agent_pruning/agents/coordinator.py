@@ -70,6 +70,22 @@ class AgentCoordinator:
         
         logger.info("🤖 Agent Coordinator initialized with 6-agent workflow")
     
+    def _extract_response_data(self, response, operation_name: str):
+        """Extract data from agent response (handles both dict and AgentResponse)."""
+        
+        if hasattr(response, 'success'):
+            # It's an AgentResponse object
+            success = response.success
+            message = response.message
+            data = response.data
+        else:
+            # It's a dictionary
+            success = response.get('success', False)
+            message = response.get('message', f'{operation_name} completed')
+            data = response
+        
+        return success, message, data
+    
     def run_pruning_workflow(self, state: PruningState) -> Dict[str, Any]:
         """
         Execute the complete multi-agent pruning workflow.
@@ -111,7 +127,7 @@ class AgentCoordinator:
                     'step': step_idx + 1,
                     'agent': agent_name,
                     'timestamp': datetime.now().isoformat(),
-                    'duration': self.profiler.timings[f"agent_{agent_name}"][-1],
+                    'duration': self.profiler.timings[f"agent_{agent_name}"][-1].duration if f"agent_{agent_name}" in self.profiler.timings else 0,
                     'success': step_result.get('success', False),
                     'error': step_result.get('error')
                 })
@@ -164,12 +180,17 @@ class AgentCoordinator:
             logger.debug(f"🔧 Executing {agent_name} agent with input keys: {list(agent_input.keys())}")
             result = agent.execute(agent_input)
             
-            # Validate result
-            if not isinstance(result, dict):
-                raise ValueError(f"Agent {agent_name} returned invalid result type: {type(result)}")
+            # Extract response data (handles both dict and AgentResponse)
+            success, message, data = self._extract_response_data(result, agent_name)
             
-            result['success'] = True
-            return result
+            # Return standardized format
+            return {
+                'success': success,
+                'message': message,
+                'data': data,
+                'agent': agent_name,
+                'timestamp': datetime.now().isoformat()
+            }
             
         except Exception as e:
             logger.error(f"❌ Agent {agent_name} execution failed: {str(e)}")
@@ -225,19 +246,19 @@ class AgentCoordinator:
                 **base_input,
                 'model': state.model,
                 'analysis_results': state.analysis_results,
-                'master_directives': state.master_results.get('directives', {}),
-                'importance_criterion': state.analysis_results.get('importance_criterion', 'taylor'),
-                'pruning_config': state.analysis_results.get('pruning_config', {})
+                'master_directives': state.master_results.get('directives', {}) if state.master_results else {},
+                'importance_criterion': state.analysis_results.get('importance_criterion', 'taylor') if state.analysis_results else 'taylor',
+                'pruning_config': state.analysis_results.get('pruning_config', {}) if state.analysis_results else {}
             }
         
         elif agent_name == 'finetuning':
             # Fine-tuning Agent: Recover performance
             return {
                 **base_input,
-                'pruned_model': state.pruning_results.get('pruned_model'),
-                'pruning_info': state.pruning_results.get('pruning_info', {}),
-                'zero_shot_accuracy': state.pruning_results.get('zero_shot_accuracy', 0),
-                'target_accuracy': state.master_results.get('target_accuracy', 75.0)
+                'pruned_model': state.pruning_results.get('pruned_model') if state.pruning_results else None,
+                'pruning_info': state.pruning_results.get('pruning_info', {}) if state.pruning_results else {},
+                'zero_shot_accuracy': state.pruning_results.get('zero_shot_accuracy', 0) if state.pruning_results else 0,
+                'target_accuracy': state.master_results.get('target_accuracy', 75.0) if state.master_results else 75.0
             }
         
         elif agent_name == 'evaluation':
@@ -245,10 +266,10 @@ class AgentCoordinator:
             return {
                 **base_input,
                 'original_model': state.model,
-                'pruned_model': state.pruning_results.get('pruned_model'),
-                'finetuned_model': state.fine_tuning_results.get('finetuned_model'),
-                'pruning_info': state.pruning_results.get('pruning_info', {}),
-                'finetuning_info': state.fine_tuning_results.get('finetuning_info', {})
+                'pruned_model': state.pruning_results.get('pruned_model') if state.pruning_results else None,
+                'finetuned_model': state.fine_tuning_results.get('finetuned_model') if state.fine_tuning_results else None,
+                'pruning_info': state.pruning_results.get('pruning_info', {}) if state.pruning_results else {},
+                'finetuning_info': state.fine_tuning_results.get('finetuning_info', {}) if state.fine_tuning_results else {}
             }
         
         else:
@@ -258,21 +279,24 @@ class AgentCoordinator:
                                       agent_name: str, result: Dict[str, Any]):
         """Update workflow state with agent results."""
         
+        # Extract data from result
+        data = result.get('data', result)
+        
         if agent_name == 'profiling':
-            state.profile_results = result
+            state.profile_results = data
         elif agent_name == 'master':
-            state.master_results = result
+            state.master_results = data
         elif agent_name == 'analysis':
-            state.analysis_results = result
+            state.analysis_results = data
         elif agent_name == 'pruning':
-            state.pruning_results = result
+            state.pruning_results = data
             # Track attempted ratio
-            if 'achieved_ratio' in result:
-                state.attempted_pruning_ratios.append(result['achieved_ratio'])
+            if 'achieved_ratio' in data:
+                state.attempted_pruning_ratios.append(data['achieved_ratio'])
         elif agent_name == 'finetuning':
-            state.fine_tuning_results = result
+            state.fine_tuning_results = data
         elif agent_name == 'evaluation':
-            state.evaluation_results = result
+            state.evaluation_results = data
     
     def _get_timing_summary(self) -> Dict[str, Any]:
         """Get timing summary for the workflow."""
@@ -284,7 +308,7 @@ class AgentCoordinator:
             agent_key = f"agent_{agent_name}"
             if agent_key in self.profiler.timings:
                 times = self.profiler.timings[agent_key]
-                agent_time = times[-1] if times else 0
+                agent_time = times[-1].duration if times else 0
                 timing_summary[agent_name] = {
                     'duration': agent_time,
                     'percentage': 0  # Will be calculated after total
@@ -343,13 +367,14 @@ class AgentCoordinator:
         # Print key results if available
         if workflow_results['success'] and 'evaluation' in workflow_results['agent_outputs']:
             eval_results = workflow_results['agent_outputs']['evaluation']
+            eval_data = eval_results.get('data', eval_results)
             print(f"\n🎯 FINAL RESULTS:")
             print("-" * 20)
-            print(f"Final Accuracy: {eval_results.get('final_accuracy', 0):.2f}%")
-            print(f"MACs Reduction: {eval_results.get('macs_reduction', 0):.1%}")
-            print(f"Params Reduction: {eval_results.get('params_reduction', 0):.1%}")
-            print(f"Achieved MACs (G): {eval_results.get('final_macs_g', 0):.2f}")
-            print(f"Achieved Params (M): {eval_results.get('final_params_m', 0):.2f}")
+            print(f"Final Accuracy: {eval_data.get('final_accuracy', 0):.2f}%")
+            print(f"MACs Reduction: {eval_data.get('macs_reduction', 0):.1%}")
+            print(f"Params Reduction: {eval_data.get('params_reduction', 0):.1%}")
+            print(f"Achieved MACs (G): {eval_data.get('final_macs_g', 0):.2f}")
+            print(f"Achieved Params (M): {eval_data.get('final_params_m', 0):.2f}")
         
         print("="*80)
     
@@ -381,7 +406,8 @@ class AgentCoordinator:
             # Check if this is the best result so far
             if result['success']:
                 eval_results = result['agent_outputs'].get('evaluation', {})
-                accuracy = eval_results.get('final_accuracy', 0)
+                eval_data = eval_results.get('data', eval_results)
+                accuracy = eval_data.get('final_accuracy', 0)
                 
                 if accuracy > best_accuracy:
                     best_accuracy = accuracy
@@ -389,7 +415,8 @@ class AgentCoordinator:
             
             # Check Master Agent's decision to continue
             master_results = result['agent_outputs'].get('master', {})
-            should_continue = master_results.get('continue_iterations', False)
+            master_data = master_results.get('data', master_results)
+            should_continue = master_data.get('continue_iterations', False)
             
             if not should_continue:
                 logger.info("🛑 Master Agent decided to stop iterations")
@@ -537,11 +564,14 @@ class AgentCoordinator:
         # Run profiling agent
         profiling_response = self.profiling_agent.execute(context)
         
-        if not profiling_response.success:
-            raise RuntimeError(f"Profiling failed: {profiling_response.message}")
+        # Extract response data (handles both dict and AgentResponse)
+        success, message, data = self._extract_response_data(profiling_response, "Profiling")
         
-        self.logger.info(f"✅ Profiling completed: {profiling_response.message}")
-        return profiling_response.data
+        if not success:
+            raise RuntimeError(f"Profiling failed: {message}")
+        
+        self.logger.info(f"✅ Profiling completed: {message}")
+        return data
 
     def _run_master_planning_phase(self, workflow_state):
         """Run the master planning phase."""
@@ -558,11 +588,14 @@ class AgentCoordinator:
         # Run master agent
         master_response = self.master_agent.execute(context)
         
-        if not master_response.success:
-            raise RuntimeError(f"Master planning failed: {master_response.message}")
+        # Extract response data (handles both dict and AgentResponse)
+        success, message, data = self._extract_response_data(master_response, "Master planning")
         
-        self.logger.info(f"✅ Master planning completed: {master_response.message}")
-        return master_response.data
+        if not success:
+            raise RuntimeError(f"Master planning failed: {message}")
+        
+        self.logger.info(f"✅ Master planning completed: {message}")
+        return data
 
     def _run_iterative_pruning_loop(self, workflow_state):
         """Run the iterative pruning loop."""
@@ -586,8 +619,10 @@ class AgentCoordinator:
             }
             
             analysis_response = self.analysis_agent.execute(analysis_context)
-            if not analysis_response.success:
-                self.logger.warning(f"Analysis failed: {analysis_response.message}")
+            success, message, analysis_data = self._extract_response_data(analysis_response, "Analysis")
+            
+            if not success:
+                self.logger.warning(f"Analysis failed: {message}")
                 continue
             
             # Pruning phase
@@ -595,7 +630,7 @@ class AgentCoordinator:
             pruning_context = {
                 'model': current_model,
                 'model_info': workflow_state.get('profiling_results', {}).get('model_info', {}),
-                'analysis_results': analysis_response.data,
+                'analysis_results': analysis_data,
                 'safety_constraints': {
                     'max_mlp_ratio': 0.15,
                     'max_attention_ratio': 0.10,
@@ -604,15 +639,17 @@ class AgentCoordinator:
             }
             
             pruning_response = self.pruning_agent.execute(pruning_context)
-            if not pruning_response.success:
-                self.logger.warning(f"Pruning failed: {pruning_response.message}")
+            success, message, pruning_data = self._extract_response_data(pruning_response, "Pruning")
+            
+            if not success:
+                self.logger.warning(f"Pruning failed: {message}")
                 continue
             
             # Store iteration results
             iteration_result = {
                 'iteration': iteration + 1,
-                'analysis': analysis_response.data,
-                'pruning': pruning_response.data,
+                'analysis': analysis_data,
+                'pruning': pruning_data,
                 'timestamp': self._get_timestamp()
             }
             iteration_results.append(iteration_result)
@@ -652,8 +689,11 @@ class AgentCoordinator:
         # Run fine-tuning agent
         finetuning_response = self.finetuning_agent.execute(context)
         
-        if not finetuning_response.success:
-            self.logger.warning(f"Fine-tuning planning failed: {finetuning_response.message}")
+        # Extract response data (handles both dict and AgentResponse)
+        success, message, data = self._extract_response_data(finetuning_response, "Fine-tuning")
+        
+        if not success:
+            self.logger.warning(f"Fine-tuning planning failed: {message}")
             # Return default fine-tuning plan
             return {
                 'learning_rate': 1e-4,
@@ -662,8 +702,8 @@ class AgentCoordinator:
                 'final_accuracy': 0.75  # Placeholder
             }
         
-        self.logger.info(f"✅ Fine-tuning completed: {finetuning_response.message}")
-        return finetuning_response.data
+        self.logger.info(f"✅ Fine-tuning completed: {message}")
+        return data
 
     def _run_evaluation_phase(self, workflow_state):
         """Run the evaluation phase."""
@@ -685,8 +725,11 @@ class AgentCoordinator:
         # Run evaluation agent
         evaluation_response = self.evaluation_agent.execute(context)
         
-        if not evaluation_response.success:
-            self.logger.warning(f"Evaluation failed: {evaluation_response.message}")
+        # Extract response data (handles both dict and AgentResponse)
+        success, message, data = self._extract_response_data(evaluation_response, "Evaluation")
+        
+        if not success:
+            self.logger.warning(f"Evaluation failed: {message}")
             # Return basic evaluation
             return {
                 'overall_rating': 'fair',
@@ -694,8 +737,8 @@ class AgentCoordinator:
                 'publication_ready': False
             }
         
-        self.logger.info(f"✅ Evaluation completed: {evaluation_response.message}")
-        return evaluation_response.data
+        self.logger.info(f"✅ Evaluation completed: {message}")
+        return data
 
     def _compile_final_results(self, workflow_state):
         """Compile final results from all phases."""
