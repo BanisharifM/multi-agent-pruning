@@ -478,68 +478,107 @@ class AgentCoordinator:
         
         logger.info("🔄 Workflow reset for new execution")
 
+# DELETE
+    # def run_pruning(self, model, train_loader, val_loader, test_loader):
+    #     """
+    #     Run the complete multi-agent pruning workflow.
+        
+    #     Args:
+    #         model: PyTorch model to prune
+    #         train_loader: Training data loader
+    #         val_loader: Validation data loader  
+    #         test_loader: Test data loader
+            
+    #     Returns:
+    #         Dict containing pruning results and metrics
+    #     """
+        
+    #     self.logger.info("🚀 Starting multi-agent pruning workflow")
+        
+    #     try:
+    #         # Initialize workflow state
+    #         workflow_state = {
+    #             'model': model,
+    #             'train_loader': train_loader,
+    #             'val_loader': val_loader,
+    #             'test_loader': test_loader,
+    #             'iteration': 0,
+    #             'converged': False,
+    #             'results': {}
+    #         }
+            
+    #         # Phase 1: Profiling
+    #         self.logger.info("📊 Phase 1: Model Profiling")
+    #         profiling_results = self._run_profiling_phase(workflow_state)
+    #         workflow_state['profiling_results'] = profiling_results
+            
+    #         # Phase 2: Master Agent Planning
+    #         self.logger.info("🧠 Phase 2: Master Agent Planning")
+    #         master_plan = self._run_master_planning_phase(workflow_state)
+    #         workflow_state['master_plan'] = master_plan
+            
+    #         # Phase 3: Iterative Pruning Loop
+    #         self.logger.info("🔄 Phase 3: Iterative Pruning Loop")
+    #         pruning_results = self._run_iterative_pruning_loop(workflow_state)
+    #         workflow_state['pruning_results'] = pruning_results
+            
+    #         # Phase 4: Fine-tuning
+    #         self.logger.info("🎯 Phase 4: Fine-tuning")
+    #         finetuning_results = self._run_finetuning_phase(workflow_state)
+    #         workflow_state['finetuning_results'] = finetuning_results
+            
+    #         # Phase 5: Final Evaluation
+    #         self.logger.info("📊 Phase 5: Final Evaluation")
+    #         evaluation_results = self._run_evaluation_phase(workflow_state)
+    #         workflow_state['evaluation_results'] = evaluation_results
+            
+    #         # Compile final results
+    #         final_results = self._compile_final_results(workflow_state)
+            
+    #         self.logger.info("✅ Multi-agent pruning workflow completed successfully")
+    #         return final_results
+            
+    #     except Exception as e:
+    #         self.logger.error(f"❌ Pruning workflow failed: {str(e)}")
+    #         raise
+
     def run_pruning(self, model, train_loader, val_loader, test_loader):
         """
-        Run the complete multi-agent pruning workflow.
-        
-        Args:
-            model: PyTorch model to prune
-            train_loader: Training data loader
-            val_loader: Validation data loader  
-            test_loader: Test data loader
-            
-        Returns:
-            Dict containing pruning results and metrics
+        Run the complete multi-agent pruning workflow with proper state management.
         """
         
-        self.logger.info("🚀 Starting multi-agent pruning workflow")
+        # Create proper state using StateManager
+        state_manager = StateManager(cache_dir=self.config.get('cache_dir', './cache'))
         
-        try:
-            # Initialize workflow state
-            workflow_state = {
-                'model': model,
-                'train_loader': train_loader,
-                'val_loader': val_loader,
-                'test_loader': test_loader,
-                'iteration': 0,
-                'converged': False,
-                'results': {}
-            }
-            
-            # Phase 1: Profiling
-            self.logger.info("📊 Phase 1: Model Profiling")
-            profiling_results = self._run_profiling_phase(workflow_state)
-            workflow_state['profiling_results'] = profiling_results
-            
-            # Phase 2: Master Agent Planning
-            self.logger.info("🧠 Phase 2: Master Agent Planning")
-            master_plan = self._run_master_planning_phase(workflow_state)
-            workflow_state['master_plan'] = master_plan
-            
-            # Phase 3: Iterative Pruning Loop
-            self.logger.info("🔄 Phase 3: Iterative Pruning Loop")
-            pruning_results = self._run_iterative_pruning_loop(workflow_state)
-            workflow_state['pruning_results'] = pruning_results
-            
-            # Phase 4: Fine-tuning
-            self.logger.info("🎯 Phase 4: Fine-tuning")
-            finetuning_results = self._run_finetuning_phase(workflow_state)
-            workflow_state['finetuning_results'] = finetuning_results
-            
-            # Phase 5: Final Evaluation
-            self.logger.info("📊 Phase 5: Final Evaluation")
-            evaluation_results = self._run_evaluation_phase(workflow_state)
-            workflow_state['evaluation_results'] = evaluation_results
-            
-            # Compile final results
-            final_results = self._compile_final_results(workflow_state)
-            
-            self.logger.info("✅ Multi-agent pruning workflow completed successfully")
-            return final_results
-            
-        except Exception as e:
-            self.logger.error(f"❌ Pruning workflow failed: {str(e)}")
-            raise
+        # Extract configuration parameters
+        model_name = self.config.get('model', {}).get('name', 'unknown')
+        dataset_name = self.config.get('dataset', {}).get('name', 'imagenet')
+        target_ratio = self.config.get('pruning', {}).get('target_ratio', 0.5)
+        
+        # Create comprehensive query
+        query = f"Prune {model_name} to {target_ratio:.1%} parameter reduction on {dataset_name}"
+        
+        # Create proper state object
+        state = state_manager.create_state(
+            query=query,
+            model_name=model_name,
+            dataset=dataset_name,
+            target_ratio=target_ratio,
+            num_classes=self.config.get('dataset', {}).get('num_classes', 1000),
+            input_size=self.config.get('dataset', {}).get('input_size', 224),
+            data_path=self.config.get('dataset', {}).get('data_path', '')
+        )
+        
+        # Set the model reference properly
+        state.model = model
+        
+        # Store data loaders in state for agent access
+        state.train_loader = train_loader
+        state.val_loader = val_loader
+        state.test_loader = test_loader
+        
+        # Use the unified workflow
+        return self.run_pruning_workflow(state)
 
     def _run_profiling_phase(self, workflow_state):
         """Run the profiling phase."""
