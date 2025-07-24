@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: multi-agent-pruning
-Version: 0.2.1
+Version: 0.2.3
 Summary: Multi-Agent LLM Pruning Framework for Neural Network Compression
 Home-page: https://github.com/BanisharifM/Multi-Agent-Pruning
 Author: Mahdi Banisharifdekordi
