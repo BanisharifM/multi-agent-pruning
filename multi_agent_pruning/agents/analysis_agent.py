@@ -10,6 +10,7 @@ import logging
 from typing import Dict, Any, Optional, List, Tuple
 import json
 from datetime import datetime
+import torch.nn as nn
 
 from .base_agent import BaseAgent, AgentResponse
 from ..core.state_manager import PruningState
@@ -325,7 +326,9 @@ class AnalysisAgent(BaseAgent):
                     'analysis_method': 'basic_fallback'
                 }
             
-            # The actual method is 'create_isomorphic_groups', not 'analyze_isomorphic_groups'
+            # The actual method signature is: create_isomorphic_groups(target_ratio, group_ratios=None)
+            # NOT: create_isomorphic_groups(target_ratio, group_ratio_multiplier)
+            
             target_ratio = 0.5  # Default target ratio
             
             # Get target ratio from master results if available
@@ -333,10 +336,17 @@ class AnalysisAgent(BaseAgent):
                 master_directives = state.master_results.get('directives', {})
                 target_ratio = master_directives.get('pruning_ratio', 0.5)
             
-            # Use the correct method
+            group_ratios = {
+                'qkv_multiplier': 0.4,      # Conservative for attention
+                'mlp_multiplier': 1.0,      # Full ratio for MLP
+                'proj_multiplier': 0.0,     # Don't prune projections
+                'head_multiplier': 0.0      # Don't prune classification head
+            }
+            
+            # Use the correct method signature
             isomorphic_groups = self.isomorphic_analyzer.create_isomorphic_groups(
                 target_ratio=target_ratio,
-                group_ratio_multiplier=1.0
+                group_ratios=group_ratios
             )
             
             # Get group statistics
