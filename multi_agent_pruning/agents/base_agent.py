@@ -78,18 +78,53 @@ class BaseAgent(ABC):
         self.profiler = profiler
         self.logger = logging.getLogger(f"{__name__}.{agent_name}")
         
+        # LLM Configuration - ADD THESE MISSING ATTRIBUTES
+        self.max_retries = 3
+        self.temperature = 0.7
+        self.max_tokens = 2000
+        self.llm_model = "gpt-4o-mini"
+        
+        # Agent Configuration - ADD THESE MISSING ATTRIBUTES  
+        self.enable_safety_checks = True
+        self.agent_role = self.get_agent_role() if hasattr(self, 'get_agent_role') else agent_name
+        self.safety_multiplier = 0.9
+        
+        # History and Tracking - ADD THESE MISSING ATTRIBUTES
+        self.conversation_history = []
+        self.reasoning_traces = []
+        
         # Initialize LLM client if not provided
         if self.llm_client is None:
             try:
                 from openai import OpenAI
-                self.llm_client = OpenAI()
-                self.llm_model = "gpt-4o-mini"  # Default model
+                
+                # Try to load API key from environment or .env file
+                api_key = os.getenv('OPENAI_API_KEY')
+                if not api_key:
+                    try:
+                        from dotenv import load_dotenv
+                        load_dotenv()
+                        api_key = os.getenv('OPENAI_API_KEY')
+                    except ImportError:
+                        pass
+                
+                if not api_key:
+                    # Try to read directly from .env file
+                    try:
+                        with open('.env', 'r') as f:
+                            for line in f:
+                                if line.startswith('OPENAI_API_KEY='):
+                                    api_key = line.split('=', 1)[1].strip()
+                                    break
+                    except FileNotFoundError:
+                        pass
+                
+                self.llm_client = OpenAI(api_key=api_key)
+                
             except ImportError:
                 self.logger.warning("OpenAI client not available, LLM features disabled")
                 self.llm_client = None
                 self.llm_model = None
-        else:
-            self.llm_model = "gpt-4o-mini"  # Default model
         
         # Initialize profiler if not provided
         if self.profiler is None:
