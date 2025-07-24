@@ -1253,38 +1253,47 @@ class AnalysisAgent(BaseAgent):
                 'validation_can_overlap_with_next_phase_prep'
             ]
         }
-    
+
     def _calculate_confidence_score(self, analysis_results: Dict[str, Any]) -> float:
-        """Calculate confidence score for the analysis and recommendations."""
+        """Calculate confidence score for analysis results with FIXED architecture access."""
         
         confidence_factors = []
         
-        # Architecture analysis confidence
+        # Architecture analysis confidence - FIXED: Use actual returned structure
         arch_analysis = analysis_results['architecture_analysis']
-        if arch_analysis['architecture_info']['model_type'] != 'unknown':
+        architecture_complexity = arch_analysis.get('architecture_complexity', 'unknown')
+        if architecture_complexity != 'unknown':
             confidence_factors.append(0.9)
         else:
             confidence_factors.append(0.6)
         
         # Dependency analysis confidence
         dep_analysis = analysis_results['dependency_analysis']
-        if dep_analysis['dependency_graph_summary']['total_constraints'] > 0:
-            confidence_factors.append(0.85)
-        else:
-            confidence_factors.append(0.7)
-        
-        # Safety analysis confidence
-        safety_analysis = analysis_results['safety_analysis']
-        if safety_analysis['current_config_safety']['is_safe']:
-            confidence_factors.append(0.9)
+        if dep_analysis.get('dependencies'):
+            confidence_factors.append(0.8)
         else:
             confidence_factors.append(0.5)
         
-        # Calculate weighted average
-        overall_confidence = sum(confidence_factors) / len(confidence_factors)
+        # Isomorphic analysis confidence
+        iso_analysis = analysis_results['isomorphic_analysis']
+        if iso_analysis.get('groups'):
+            confidence_factors.append(0.85)
+        else:
+            confidence_factors.append(0.6)
         
-        return round(overall_confidence, 2)
-    
+        # Safety analysis confidence
+        safety_analysis = analysis_results['safety_analysis']
+        if safety_analysis.get('constraints'):
+            confidence_factors.append(0.9)
+        else:
+            confidence_factors.append(0.7)
+        
+        # Calculate weighted average
+        confidence_score = sum(confidence_factors) / len(confidence_factors)
+        
+        logger.info(f"📊 Calculated confidence score: {confidence_score:.3f}")
+        return confidence_score
+
     def _get_llm_analysis(self, state: PruningState, analysis_results: Dict[str, Any],
                          recommendations: Dict[str, Any]) -> Dict[str, Any]:
         """Get LLM-based analysis and validation of recommendations."""
@@ -1312,71 +1321,59 @@ class AnalysisAgent(BaseAgent):
                 'error': str(e),
                 'fallback_used': True
             }
-    
-    def _create_llm_analysis_prompt(self, state: PruningState, analysis_results: Dict[str, Any],
-                                  recommendations: Dict[str, Any]) -> str:
-        """Create comprehensive prompt for LLM analysis."""
+    def _create_llm_analysis_prompt(self, state: PruningState, 
+                                analysis_results: Dict[str, Any], 
+                                recommendations: Dict[str, Any]) -> str:
+        """Create LLM analysis prompt with FIXED architecture data access."""
         
-        # Extract key information
         model_name = getattr(state, 'model_name', 'unknown')
         target_ratio = self._get_target_pruning_ratio(state)
         dataset = getattr(state, 'dataset', 'unknown')
         
-        arch_info = analysis_results['architecture_analysis']['architecture_info']
+        # FIXED: Extract architecture information safely from actual keys
+        arch_analysis = analysis_results['architecture_analysis']
+        model_type = getattr(state, 'model_name', 'unknown')
+        total_parameters = arch_analysis.get('total_parameters', 0)
+        model_size_mb = total_parameters * 4 / (1024 * 1024)  # Estimate
+        architecture_complexity = arch_analysis.get('architecture_complexity', 'unknown')
+        
         safety_info = analysis_results['safety_analysis']
         
         prompt = f"""
-You are an expert in neural network pruning and optimization. Analyze the following pruning scenario and provide strategic insights.
+    You are an expert in neural network pruning and optimization. Analyze the following pruning scenario and provide strategic insights.
 
-## Model Information:
-- Model: {model_name}
-- Architecture: {arch_info['model_type']}
-- Total Parameters: {arch_info['total_parameters']:,}
-- Model Size: {arch_info['model_size_mb']:.1f} MB
-- Target Pruning Ratio: {target_ratio:.1%}
-- Dataset: {dataset}
+    ## Model Information:
+    - Model: {model_name}
+    - Architecture: {model_type}
+    - Total Parameters: {total_parameters:,}
+    - Model Size: {model_size_mb:.1f} MB
+    - Architecture Complexity: {architecture_complexity}
+    - Target Pruning Ratio: {target_ratio:.1%}
+    - Dataset: {dataset}
 
-## Analysis Results:
-{json.dumps(analysis_results, indent=2)}
+    ## Architecture Analysis:
+    - Total Layers: {arch_analysis.get('total_layers', 0)}
+    - Prunable Layers: {arch_analysis.get('prunable_layers', 0)}
+    - Layer Types: {arch_analysis.get('layer_types', {})}
 
-## Current Recommendations:
-{json.dumps(recommendations, indent=2)}
+    ## Safety Constraints:
+    {safety_info.get('constraints', 'No specific constraints identified')}
 
-## Please provide analysis on:
+    ## Current Recommendations:
+    - Importance Criterion: {recommendations.get('importance_criterion', 'Not specified')}
+    - Group Ratios: {recommendations.get('group_ratios', 'Not specified')}
+    - Safety Measures: {recommendations.get('safety_measures', 'Not specified')}
 
-1. **Strategy Validation**: Are the recommended group ratios and importance criterion appropriate for this model and target ratio?
+    Please provide:
+    1. Strategic insights about this pruning configuration
+    2. Potential risks and mitigation strategies
+    3. Alternative approaches if current strategy seems suboptimal
+    4. Expected performance impact assessment
 
-2. **Risk Assessment**: What are the main risks with this pruning configuration? How can they be mitigated?
-
-3. **Alternative Approaches**: Are there alternative strategies that might work better?
-
-4. **Expected Outcomes**: What accuracy retention and performance gains can realistically be expected?
-
-5. **Implementation Recommendations**: Any specific implementation details or precautions?
-
-Please provide your analysis in JSON format with the following structure:
-{{
-  "strategy_validation": {{
-    "is_appropriate": boolean,
-    "concerns": [list of concerns],
-    "suggestions": [list of suggestions]
-  }},
-  "risk_assessment": {{
-    "high_risks": [list],
-    "medium_risks": [list],
-    "mitigation_strategies": [list]
-  }},
-  "alternative_approaches": [list of alternatives],
-  "expected_outcomes": {{
-    "accuracy_retention_estimate": float,
-    "performance_gain_estimate": float,
-    "confidence_level": "high|medium|low"
-  }},
-  "implementation_recommendations": [list of recommendations]
-}}
-"""
+    Focus on practical, actionable insights based on the model architecture and constraints.
+    """
         
-        return prompt
+        return prompt    
     
     def _parse_llm_analysis_response(self, response: str) -> Dict[str, Any]:
         """Parse and validate LLM analysis response."""
