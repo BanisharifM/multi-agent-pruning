@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, AgentResponse
 from ..core.state_manager import PruningState
 from ..utils.profiler import TimingProfiler
 from ..utils.metrics import AccuracyTracker
@@ -882,4 +882,182 @@ Please provide analysis in JSON format:
             'error': error_message,
             'next_agent': None
         }
+
+    def get_agent_role(self) -> str:
+        """Return the role of this agent."""
+        return "finetuning_agent"
+    
+    def get_system_prompt(self, context: Dict[str, Any]) -> str:
+        """Generate system prompt for the fine-tuning agent."""
+        
+        model_info = context.get('model_info', {})
+        pruning_results = context.get('pruning_results', {})
+        training_config = context.get('training_config', {})
+        dataset_info = context.get('dataset_info', {})
+        
+        prompt = f"""You are an expert Fine-tuning Agent in a multi-agent neural network pruning system.
+
+ROLE: Recover model performance after pruning through intelligent fine-tuning with adaptive strategies.
+
+CURRENT CONTEXT:
+- Model: {model_info.get('name', 'Unknown')} ({model_info.get('total_params', 0):,} parameters)
+- Architecture: {model_info.get('architecture_type', 'Unknown')}
+- Pruning applied: {pruning_results.get('compression_ratio', 0.0)*100:.1f}% compression
+- Dataset: {dataset_info.get('name', 'Unknown')} ({dataset_info.get('num_classes', 'Unknown')} classes)
+
+PRUNING IMPACT:
+- Parameters removed: {pruning_results.get('params_removed', 0):,}
+- Accuracy drop: {pruning_results.get('accuracy_drop', 0.0)*100:.1f}%
+- Layers affected: {len(pruning_results.get('affected_layers', []))}
+- Recovery target: {pruning_results.get('target_accuracy', 0.0)*100:.1f}%
+
+FINE-TUNING RESPONSIBILITIES:
+1. Design adaptive learning rate schedule based on pruning severity
+2. Select optimal training strategy (full fine-tuning vs layer-wise)
+3. Configure early stopping and convergence detection
+4. Monitor recovery progress and adjust hyperparameters
+5. Ensure stable training without overfitting
+
+ARCHITECTURE-SPECIFIC STRATEGIES:
+- Transformers: Lower LR for attention, higher for MLP, warmup essential
+- CNNs: Layer-wise LR scaling, batch norm adaptation, data augmentation
+- Hybrid: Component-specific strategies with careful coordination
+
+TRAINING CONFIGURATION:
+- Base learning rate: {training_config.get('base_lr', 1e-4)}
+- Batch size: {training_config.get('batch_size', 32)}
+- Max epochs: {training_config.get('max_epochs', 100)}
+- Patience: {training_config.get('patience', 10)}
+
+DECISION FRAMEWORK:
+- ADAPTIVE: Adjust strategy based on pruning severity and architecture
+- EFFICIENT: Minimize training time while maximizing recovery
+- STABLE: Prevent overfitting and ensure convergence
+- MONITORED: Track progress and intervene if needed
+
+Provide structured fine-tuning plan with clear rationale for each decision."""
+        
+        return prompt
+    
+    def parse_llm_response(self, response: str, context: Dict[str, Any]) -> AgentResponse:
+        """Parse LLM response for fine-tuning decisions."""
+        
+        try:
+            # Extract key fine-tuning decisions from response
+            decisions = {}
+            
+            # Look for learning rate recommendations
+            import re
+            
+            lr_match = re.search(r'learning.?rate.*?(\d+\.?\d*e?-?\d*)', response.lower())
+            if lr_match:
+                decisions['learning_rate'] = float(lr_match.group(1))
+            else:
+                decisions['learning_rate'] = 1e-4  # default
+            
+            # Extract training strategy
+            if 'layer-wise' in response.lower() or 'layerwise' in response.lower():
+                decisions['training_strategy'] = 'layer_wise'
+            elif 'full' in response.lower() and 'fine' in response.lower():
+                decisions['training_strategy'] = 'full_finetuning'
+            elif 'progressive' in response.lower():
+                decisions['training_strategy'] = 'progressive'
+            else:
+                decisions['training_strategy'] = 'full_finetuning'  # default
+            
+            # Extract epochs recommendation
+            epochs_match = re.search(r'epoch.*?(\d+)', response.lower())
+            if epochs_match:
+                decisions['max_epochs'] = int(epochs_match.group(1))
+            else:
+                decisions['max_epochs'] = 50  # default
+            
+            # Extract patience for early stopping
+            patience_match = re.search(r'patience.*?(\d+)', response.lower())
+            if patience_match:
+                decisions['patience'] = int(patience_match.group(1))
+            else:
+                decisions['patience'] = 10  # default
+            
+            # Extract warmup strategy
+            if 'warmup' in response.lower():
+                warmup_match = re.search(r'warmup.*?(\d+)', response.lower())
+                if warmup_match:
+                    decisions['warmup_epochs'] = int(warmup_match.group(1))
+                else:
+                    decisions['warmup_epochs'] = 5
+            else:
+                decisions['warmup_epochs'] = 0
+            
+            # Extract learning rate schedule
+            if 'cosine' in response.lower():
+                decisions['lr_schedule'] = 'cosine'
+            elif 'step' in response.lower():
+                decisions['lr_schedule'] = 'step'
+            elif 'exponential' in response.lower():
+                decisions['lr_schedule'] = 'exponential'
+            else:
+                decisions['lr_schedule'] = 'cosine'  # default
+            
+            # Extract data augmentation strategy
+            if 'augmentation' in response.lower() or 'augment' in response.lower():
+                decisions['use_augmentation'] = True
+                if 'heavy' in response.lower() or 'aggressive' in response.lower():
+                    decisions['augmentation_strength'] = 'heavy'
+                elif 'light' in response.lower() or 'mild' in response.lower():
+                    decisions['augmentation_strength'] = 'light'
+                else:
+                    decisions['augmentation_strength'] = 'medium'
+            else:
+                decisions['use_augmentation'] = False
+                decisions['augmentation_strength'] = 'none'
+            
+            # Extract confidence and rationale
+            if 'confident' in response.lower() or 'certain' in response.lower():
+                confidence = 0.9
+            elif 'uncertain' in response.lower() or 'unsure' in response.lower():
+                confidence = 0.5
+            else:
+                confidence = 0.7
+            
+            # Extract key rationale points
+            rationale = []
+            lines = response.split('\n')
+            for line in lines:
+                if any(keyword in line.lower() for keyword in ['because', 'since', 'due to', 'reason', 'strategy']):
+                    rationale.append(line.strip())
+            
+            decisions['rationale'] = rationale[:3]  # Keep top 3 reasons
+            
+            # Determine success based on content quality
+            success = (
+                len(decisions) >= 5 and 
+                'error' not in response.lower() and
+                decisions['learning_rate'] > 0 and
+                decisions['max_epochs'] > 0
+            )
+            
+            return AgentResponse(
+                success=success,
+                data=decisions,
+                message=f"Fine-tuning plan: {decisions['training_strategy']}, LR={decisions['learning_rate']:.2e}, {decisions['max_epochs']} epochs",
+                confidence=confidence
+            )
+            
+        except Exception as e:
+            return AgentResponse(
+                success=False,
+                data={
+                    'learning_rate': 1e-4,
+                    'training_strategy': 'full_finetuning',
+                    'max_epochs': 50,
+                    'patience': 10,
+                    'warmup_epochs': 5,
+                    'lr_schedule': 'cosine',
+                    'use_augmentation': True,
+                    'augmentation_strength': 'medium'
+                },
+                message=f"Failed to parse fine-tuning response, using safe defaults: {str(e)}",
+                confidence=0.3
+            )
 
