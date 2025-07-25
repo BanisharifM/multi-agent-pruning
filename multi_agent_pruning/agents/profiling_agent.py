@@ -117,32 +117,6 @@ class ProfilingAgent(BaseAgent):
         
         logger.info("📊 Profiling Agent initialized with proper inheritance")
     
-# DELETE
-    # def _initialize_profiling_components(self):
-    #     """Initialize profiling-specific components based on configuration."""
-        
-    #     # Initialize dependency analyzer
-    #     dependency_config = self.config.get('dependency_analysis', {})
-    #     if dependency_config.get('enabled', True):
-    #         self.dependency_analyzer = DependencyAnalyzer(
-    #             cache_enabled=dependency_config.get('cache_enabled', True),
-    #             cache_dir=dependency_config.get('cache_dir', './cache/dependencies')
-    #         )
-        
-    #     # Initialize isomorphic analyzer
-    #     isomorphic_config = self.config.get('isomorphic_analysis', {})
-    #     if isomorphic_config.get('enabled', True):
-    #         self.isomorphic_analyzer = IsomorphicAnalyzer(
-    #             similarity_threshold=isomorphic_config.get('similarity_threshold', 0.95),
-    #             cache_enabled=isomorphic_config.get('cache_enabled', True)
-    #         )
-        
-    #     # Configure profiling behavior
-    #     profiling_config = self.config.get('profiling', {})
-    #     self.enable_detailed_profiling = profiling_config.get('detailed', True)
-    #     self.enable_memory_profiling = profiling_config.get('memory', True)
-    #     self.enable_flops_counting = profiling_config.get('flops', True)
-    
     def _initialize_profiling_components(self):
         """Initialize profiling-specific components based on configuration."""
         
