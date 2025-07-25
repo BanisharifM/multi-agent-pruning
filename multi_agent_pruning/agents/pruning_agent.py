@@ -649,6 +649,12 @@ class PruningAgent(BaseAgent):
                     criterion = 'l1norm'
             
             criterion = self._normalize_criterion_name(criterion)
+
+            # DEBUG MODE
+            # criterion = 'magnitude_l1'  # Force L1 for debugging
+            criterion = 'magnitude_l2'  # Force L2 for debugging
+
+            
             logger.info(f"📊 Using importance criterion: {criterion}")
             
             data_loader = self._get_dataloader_for_importance(state, criterion)
