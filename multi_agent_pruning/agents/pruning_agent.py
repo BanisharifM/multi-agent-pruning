@@ -282,32 +282,6 @@ class PruningAgent(BaseAgent):
             logger.info("✅ Pruning pipeline execution completed")
             return pipeline_results
 
-# DELETE
-    # def _compute_importance_fallback(self, model: torch.nn.Module, criterion: str) -> Dict[str, float]:
-    #     """Fallback method to compute importance scores when ImportanceCriteria fails."""
-        
-    #     importance_scores = {}
-        
-    #     for name, module in model.named_modules():
-    #         if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
-    #             if criterion == 'l1norm':
-    #                 # L1 norm of weights
-    #                 score = torch.norm(module.weight.data, p=1).item()
-    #             elif criterion == 'l2norm':
-    #                 # L2 norm of weights
-    #                 score = torch.norm(module.weight.data, p=2).item()
-    #             elif criterion == 'magnitude':
-    #                 # Mean absolute weight
-    #                 score = torch.mean(torch.abs(module.weight.data)).item()
-    #             else:
-    #                 # Default to L1 norm
-    #                 score = torch.norm(module.weight.data, p=1).item()
-                
-    #             importance_scores[name] = score
-        
-    #     logger.info(f"✅ Computed fallback importance scores for {len(importance_scores)} layers using {criterion}")
-    #     return importance_scores
-
     def _compute_importance_fallback(self, model: torch.nn.Module, criterion: str) -> Dict[str, float]:
         """Fallback method to compute importance scores when ImportanceCriteria fails."""
         
@@ -316,7 +290,8 @@ class PruningAgent(BaseAgent):
         for name, module in model.named_modules():
             if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
                 score = self._compute_layer_importance_fallback(module, criterion)
-                importance_scores[name] = score
+                # Ensure the score is a float
+                importance_scores[name] = float(score)
         
         logger.info(f"✅ Computed fallback importance scores for {len(importance_scores)} layers using {criterion}")
         return importance_scores
@@ -329,19 +304,92 @@ class PruningAgent(BaseAgent):
         
         weight = layer.weight.data
         
-        if criterion == 'l1norm':
-            return torch.norm(weight, p=1).item()
-        elif criterion == 'l2norm':
-            return torch.norm(weight, p=2).item()
-        elif criterion == 'magnitude':
-            return torch.mean(torch.abs(weight)).item()
-        elif criterion == 'variance':
-            return torch.var(weight).item()
-        elif criterion == 'std':
-            return torch.std(weight).item()
-        else:
-            # Default to L1 norm
-            return torch.norm(weight, p=1).item()
+        try:
+            if criterion == 'l1norm':
+                score = torch.norm(weight, p=1).item()
+            elif criterion == 'l2norm':
+                score = torch.norm(weight, p=2).item()
+            elif criterion == 'magnitude':
+                score = torch.mean(torch.abs(weight)).item()
+            elif criterion == 'variance':
+                score = torch.var(weight).item()
+            elif criterion == 'std':
+                score = torch.std(weight).item()
+            else:
+                # Default to L1 norm
+                score = torch.norm(weight, p=1).item()
+            
+            # Ensure the result is a finite float
+            if not isinstance(score, (int, float)) or not torch.isfinite(torch.tensor(score)):
+                logger.warning(f"⚠️ Invalid score computed for layer, using 0.0: {score}")
+                return 0.0
+            
+            return float(score)
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error computing layer importance: {e}")
+            return 0.0
+
+    def _extract_numeric_score(self, score_result) -> float:
+        """Extract numeric value from ImportanceScore object or return as-is if already numeric."""
+        
+        # If it's already a numeric type, return it
+        if isinstance(score_result, (int, float)):
+            return float(score_result)
+        
+        # If it's a tensor, convert to float
+        if isinstance(score_result, torch.Tensor):
+            return score_result.item() if score_result.numel() == 1 else float(score_result.mean())
+        
+        # If it's an ImportanceScore object, try to extract the numeric value
+        if hasattr(score_result, 'value'):
+            value = score_result.value
+            if isinstance(value, torch.Tensor):
+                return value.item() if value.numel() == 1 else float(value.mean())
+            elif isinstance(value, (int, float)):
+                return float(value)
+        
+        # Try other common attribute names for the numeric value
+        for attr_name in ['score', 'magnitude', 'importance', 'weight']:
+            if hasattr(score_result, attr_name):
+                attr_value = getattr(score_result, attr_name)
+                if isinstance(attr_value, torch.Tensor):
+                    return attr_value.item() if attr_value.numel() == 1 else float(attr_value.mean())
+                elif isinstance(attr_value, (int, float)):
+                    return float(attr_value)
+        
+        # If it has a __float__ method, use it
+        if hasattr(score_result, '__float__'):
+            try:
+                return float(score_result)
+            except:
+                pass
+        
+        # If it's iterable, try to get the first numeric value
+        try:
+            if hasattr(score_result, '__iter__') and not isinstance(score_result, str):
+                for item in score_result:
+                    if isinstance(item, (int, float)):
+                        return float(item)
+                    elif isinstance(item, torch.Tensor):
+                        return item.item() if item.numel() == 1 else float(item.mean())
+        except:
+            pass
+        
+        # Try to convert to string and then parse as float
+        try:
+            str_repr = str(score_result)
+            # Look for numeric patterns in the string representation
+            import re
+            numeric_match = re.search(r'(\d+\.?\d*)', str_repr)
+            if numeric_match:
+                return float(numeric_match.group(1))
+        except:
+            pass
+        
+        # Final fallback: return 0.0 and log warning
+        logger.warning(f"⚠️ Could not extract numeric value from ImportanceScore object: {type(score_result)}, using 0.0")
+        return 0.0
 
     def _compute_importance_scores(self, state: PruningState, 
                                  recommendations: Dict[str, Any]) -> Dict[str, Any]:
@@ -385,24 +433,30 @@ class PruningAgent(BaseAgent):
                     for name, module in model.named_modules():
                         if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
                             try:
-                                # FIXED: Add model parameter to compute_importance call
-                                score = self.importance_criteria.compute_importance(
-                                    model=model,  # Added missing model parameter
+                                # Get importance score from ImportanceCriteria
+                                score_result = self.importance_criteria.compute_importance(
+                                    model=model,
                                     layer=module,
                                     layer_name=name,
                                     criterion=criterion
                                 )
-                                importance_scores[name] = score
+                                
+                                numeric_score = self._extract_numeric_score(score_result)
+                                importance_scores[name] = numeric_score
+                                
                             except TypeError as type_e:
                                 # Try different parameter combinations
                                 try:
                                     # Try without model parameter
-                                    score = self.importance_criteria.compute_importance(
+                                    score_result = self.importance_criteria.compute_importance(
                                         layer=module,
                                         layer_name=name,
                                         criterion=criterion
                                     )
-                                    importance_scores[name] = score
+                                    
+                                    numeric_score = self._extract_numeric_score(score_result)
+                                    importance_scores[name] = numeric_score
+                                    
                                 except Exception as fallback_e:
                                     logger.warning(f"⚠️ Failed to compute importance for layer {name}: {fallback_e}")
                                     # Use fallback computation for this layer
@@ -542,7 +596,6 @@ class PruningAgent(BaseAgent):
             
             importance_scores = importance_results['importance_scores']
             
-            # FIXED: Handle missing group_ratios with better defaults
             if 'group_ratios' not in recommendations:
                 logger.warning("⚠️ Missing 'group_ratios' in recommendations, creating default ratios")
                 # Create sensible default group ratios based on model architecture
@@ -729,7 +782,6 @@ class PruningAgent(BaseAgent):
             passed_tests = sum(1 for test in validation_tests.values() if test.get('passed', False))
             total_tests = len(validation_tests)
             
-            # FIXED: More lenient validation - allow some tests to fail
             validation_passed = passed_tests >= (total_tests // 2)  # At least half must pass
             
             if not validation_passed:
@@ -789,7 +841,6 @@ class PruningAgent(BaseAgent):
         
         try:
             with self.profiler.timer("llm_validation"):
-                # FIXED: Handle different LLM client interfaces
                 response = None
                 
                 # Try different method names for LLM generation
@@ -1037,6 +1088,22 @@ class PruningAgent(BaseAgent):
         logger.info(f"📋 ImportanceCriteria interface validation: {validation_info}")
         return validation_info
 
+    def _validate_importance_scores(self, importance_scores: Dict[str, Any]) -> Dict[str, float]:
+        """Validate and convert importance scores to numeric values."""
+        
+        validated_scores = {}
+        
+        for name, score in importance_scores.items():
+            try:
+                numeric_score = self._extract_numeric_score(score)
+                validated_scores[name] = numeric_score
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to convert importance score for layer {name}: {e}")
+                validated_scores[name] = 0.0
+        
+        logger.info(f"✅ Validated {len(validated_scores)} importance scores")
+        return validated_scores
+
     # Helper methods for model testing
     def _test_forward_pass(self, model: nn.Module) -> Dict[str, Any]:
         """Test if the model can perform forward pass."""
@@ -1187,27 +1254,30 @@ class PruningAgent(BaseAgent):
                 'error': str(e),
                 'message': 'Memory usage test failed'
             }
-    
-    def _analyze_importance_distribution(self, importance_scores: Dict[str, float]) -> Dict[str, Any]:
+
+    def _analyze_importance_distribution(self, importance_scores: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze the distribution of importance scores."""
         
-        scores = list(importance_scores.values())
+        numeric_scores = []
+        for name, score in importance_scores.items():
+            numeric_score = self._extract_numeric_score(score)
+            numeric_scores.append(numeric_score)
         
-        if not scores:
+        if not numeric_scores:
             return {'error': 'No importance scores to analyze'}
         
         import numpy as np
         
         return {
-            'total_layers': len(scores),
-            'mean_score': float(np.mean(scores)),
-            'std_score': float(np.std(scores)),
-            'min_score': float(np.min(scores)),
-            'max_score': float(np.max(scores)),
-            'median_score': float(np.median(scores)),
-            'score_range': float(np.max(scores) - np.min(scores))
+            'total_layers': len(numeric_scores),
+            'mean_score': float(np.mean(numeric_scores)),
+            'std_score': float(np.std(numeric_scores)),
+            'min_score': float(np.min(numeric_scores)),
+            'max_score': float(np.max(numeric_scores)),
+            'median_score': float(np.median(numeric_scores)),
+            'score_range': float(np.max(numeric_scores) - np.min(numeric_scores))
         }
-    
+
     def _create_llm_validation_prompt(self, state: PruningState, pruning_results: Dict[str, Any],
                                     validation_results: Dict[str, Any]) -> str:
         """Create prompt for LLM validation."""
