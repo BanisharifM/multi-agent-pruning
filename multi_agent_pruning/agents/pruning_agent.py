@@ -140,6 +140,32 @@ class PruningAgent(BaseAgent):
                     recovery_info=recovery_result
                 )
     
+# DELETE
+    # def _validate_input_state(self, state: PruningState) -> bool:
+    #     """Validate that the input state contains required analysis results."""
+        
+    #     required_fields = ['model', 'analysis_results']
+        
+    #     for field in required_fields:
+    #         if not hasattr(state, field) or getattr(state, field) is None:
+    #             logger.error(f"❌ Missing required field in state: {field}")
+    #             return False
+        
+    #     # Check analysis results structure
+    #     analysis_results = state.analysis_results
+    #     if not isinstance(analysis_results, dict):
+    #         logger.error("❌ Analysis results must be a dictionary")
+    #         return False
+        
+    #     required_analysis_fields = ['strategic_recommendations']
+    #     for field in required_analysis_fields:
+    #         if field not in analysis_results:
+    #             logger.error(f"❌ Missing required analysis field: {field}")
+    #             return False
+        
+    #     logger.info("✅ Input state validation passed")
+    #     return True
+    
     def _validate_input_state(self, state: PruningState) -> bool:
         """Validate that the input state contains required analysis results."""
         
@@ -162,9 +188,21 @@ class PruningAgent(BaseAgent):
                 logger.error(f"❌ Missing required analysis field: {field}")
                 return False
         
+        # Check for dataloader availability (informational)
+        has_dataloader = False
+        for attr_name in ['dataloader', 'train_loader', 'val_loader', 'test_loader']:
+            if hasattr(state, attr_name) and getattr(state, attr_name) is not None:
+                has_dataloader = True
+                break
+        
+        if not has_dataloader:
+            logger.info("ℹ️ No dataloader found in state - will create dummy dataloader for gradient-based criteria")
+        else:
+            logger.info("✅ Dataloader available for gradient-based importance criteria")
+        
         logger.info("✅ Input state validation passed")
         return True
-    
+
     def _create_checkpoint(self, state: PruningState, checkpoint_name: str):
         """Create a checkpoint of the current model state."""
         
@@ -391,6 +429,242 @@ class PruningAgent(BaseAgent):
         logger.warning(f"⚠️ Could not extract numeric value from ImportanceScore object: {type(score_result)}, using 0.0")
         return 0.0
 
+    def _infer_input_shape(self, model: torch.nn.Module) -> Optional[tuple]:
+        """Infer input shape from model architecture."""
+        
+        try:
+            # Try to find the first layer that gives us input shape information
+            for name, module in model.named_modules():
+                if isinstance(module, torch.nn.Conv2d):
+                    # For Conv2d, assume standard image input
+                    in_channels = module.in_channels
+                    # Common image sizes
+                    for size in [224, 256, 32, 64, 128]:
+                        return (in_channels, size, size)
+                elif isinstance(module, torch.nn.Linear):
+                    # For Linear layers, use the input features
+                    in_features = module.in_features
+                    return (in_features,)
+                elif isinstance(module, torch.nn.Embedding):
+                    # For embeddings, assume sequence input
+                    return (512,)  # Common sequence length
+            
+            # Fallback: try common shapes
+            common_shapes = [
+                (3, 224, 224),  # ImageNet
+                (3, 32, 32),    # CIFAR
+                (1, 28, 28),    # MNIST
+                (768,),         # Common transformer hidden size
+                (512,),         # Common hidden size
+            ]
+            
+            logger.warning("⚠️ Could not infer input shape from model, using default (3, 224, 224)")
+            return (3, 224, 224)
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error inferring input shape: {e}")
+            return None
+
+    def _infer_num_classes(self, model: torch.nn.Module) -> int:
+        """Infer number of output classes from model architecture."""
+        
+        try:
+            # Find the last linear layer (usually the classifier)
+            last_linear = None
+            for name, module in model.named_modules():
+                if isinstance(module, torch.nn.Linear):
+                    last_linear = module
+            
+            if last_linear is not None:
+                return last_linear.out_features
+            
+            # Fallback to common number of classes
+            return 1000  # ImageNet default
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error inferring number of classes: {e}")
+            return 1000
+
+    def _create_dummy_dataloader(self, state: PruningState) -> Optional[torch.utils.data.DataLoader]:
+        """Create a dummy dataloader for importance computation."""
+        
+        try:
+            model = state.model
+            
+            # Determine input shape from model
+            input_shape = self._infer_input_shape(model)
+            if input_shape is None:
+                logger.warning("⚠️ Could not infer input shape for dummy dataloader")
+                return None
+            
+            # Create dummy dataset
+            batch_size = 8  # Small batch size for efficiency
+            num_samples = 32  # Small number of samples
+            num_classes = self._infer_num_classes(model)
+            
+            # Generate random data
+            dummy_inputs = torch.randn(num_samples, *input_shape)
+            dummy_targets = torch.randint(0, num_classes, (num_samples,))
+            
+            # Create dataset and dataloader
+            dummy_dataset = torch.utils.data.TensorDataset(dummy_inputs, dummy_targets)
+            dummy_dataloader = torch.utils.data.DataLoader(
+                dummy_dataset, 
+                batch_size=batch_size, 
+                shuffle=False,
+                drop_last=False
+            )
+            
+            logger.info(f"📊 Created dummy dataloader: {num_samples} samples, batch_size={batch_size}")
+            return dummy_dataloader
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to create dummy dataloader: {e}")
+            return None
+
+    def _get_dataloader_for_importance(self, state: PruningState, criterion: str) -> Optional[torch.utils.data.DataLoader]:
+        """Get or create a dataloader for importance computation."""
+        
+        # Check if criterion needs a dataloader
+        gradient_based_criteria = ['taylor', 'gradient', 'fisher', 'snip']
+        if criterion.lower() not in gradient_based_criteria:
+            logger.debug(f"📊 Criterion '{criterion}' doesn't require dataloader")
+            return None
+        
+        # Try to find existing dataloader in state
+        for attr_name in ['dataloader', 'train_loader', 'val_loader', 'test_loader', 'data_loader']:
+            if hasattr(state, attr_name):
+                data_loader = getattr(state, attr_name)
+                if data_loader is not None:
+                    logger.info(f"📊 Using existing dataloader from state.{attr_name}")
+                    return data_loader
+        
+        # Try to find dataloader in analysis results
+        if hasattr(state, 'analysis_results') and isinstance(state.analysis_results, dict):
+            analysis_results = state.analysis_results
+            if 'dataloader' in analysis_results:
+                data_loader = analysis_results['dataloader']
+                if data_loader is not None:
+                    logger.info("📊 Using dataloader from analysis results")
+                    return data_loader
+        
+        # Try to create a dummy dataloader if we have dataset information
+        dummy_loader = self._create_dummy_dataloader(state)
+        if dummy_loader is not None:
+            logger.info("📊 Created dummy dataloader for importance computation")
+            return dummy_loader
+        
+        # No dataloader available
+        logger.warning(f"⚠️ No dataloader available for {criterion} criterion, will fall back to magnitude-based")
+        return None
+
+# DELETE
+    # def _compute_importance_scores(self, state: PruningState, 
+    #                              recommendations: Dict[str, Any]) -> Dict[str, Any]:
+    #     """Compute importance scores for all prunable layers."""
+        
+    #     with self.profiler.timer("importance_computation"):
+    #         logger.info("📊 Computing importance scores")
+            
+    #         model = state.model
+            
+    #         if 'importance_criterion' not in recommendations:
+    #             logger.warning("⚠️ Missing 'importance_criterion' in recommendations, using defaults")
+    #             criterion = 'l1norm'
+    #         else:
+    #             importance_config = recommendations['importance_criterion']
+                
+    #             if isinstance(importance_config, str):
+    #                 criterion = importance_config
+    #             elif isinstance(importance_config, dict):
+    #                 criterion = importance_config.get('primary_criterion', 'l1norm')
+    #             else:
+    #                 logger.warning(f"⚠️ importance_config is unexpected type: {type(importance_config)}, using default")
+    #                 criterion = 'l1norm'
+            
+    #         # Prepare data for gradient-based criteria
+    #         data_loader = None
+    #         if criterion == 'taylor':
+    #             for attr_name in ['dataloader', 'train_loader', 'val_loader']:
+    #                 if hasattr(state, attr_name):
+    #                     data_loader = getattr(state, attr_name)
+    #                     break
+                
+    #             if data_loader is None:
+    #                 logger.warning("⚠️ No dataloader found for Taylor criterion, falling back to L1")
+    #                 criterion = 'l1norm'
+            
+    #         importance_scores = {}
+            
+    #         if self.importance_criteria is not None:
+    #             try:
+    #                 for name, module in model.named_modules():
+    #                     if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
+    #                         try:
+    #                             # Get importance score from ImportanceCriteria
+    #                             score_result = self.importance_criteria.compute_importance(
+    #                                 model=model,
+    #                                 layer=module,
+    #                                 layer_name=name,
+    #                                 criterion=criterion
+    #                             )
+                                
+    #                             numeric_score = self._extract_numeric_score(score_result)
+    #                             importance_scores[name] = numeric_score
+                                
+    #                         except TypeError as type_e:
+    #                             # Try different parameter combinations
+    #                             try:
+    #                                 # Try without model parameter
+    #                                 score_result = self.importance_criteria.compute_importance(
+    #                                     layer=module,
+    #                                     layer_name=name,
+    #                                     criterion=criterion
+    #                                 )
+                                    
+    #                                 numeric_score = self._extract_numeric_score(score_result)
+    #                                 importance_scores[name] = numeric_score
+                                    
+    #                             except Exception as fallback_e:
+    #                                 logger.warning(f"⚠️ Failed to compute importance for layer {name}: {fallback_e}")
+    #                                 # Use fallback computation for this layer
+    #                                 score = self._compute_layer_importance_fallback(module, criterion)
+    #                                 importance_scores[name] = score
+    #                         except Exception as layer_e:
+    #                             logger.warning(f"⚠️ Failed to compute importance for layer {name}: {layer_e}")
+    #                             # Use fallback computation for this layer
+    #                             score = self._compute_layer_importance_fallback(module, criterion)
+    #                             importance_scores[name] = score
+                    
+    #                 if importance_scores:
+    #                     logger.info(f"✅ Computed importance scores for {len(importance_scores)} layers using ImportanceCriteria")
+    #                 else:
+    #                     logger.warning("⚠️ No importance scores computed, falling back to manual computation")
+    #                     importance_scores = self._compute_importance_fallback(model, criterion)
+                        
+    #             except Exception as e:
+    #                 logger.warning(f"⚠️ ImportanceCriteria computation failed: {str(e)}")
+    #                 # Fall back to manual computation
+    #                 importance_scores = self._compute_importance_fallback(model, criterion)
+    #         else:
+    #             # ImportanceCriteria is None, use fallback
+    #             logger.info("📊 Using fallback importance computation")
+    #             importance_scores = self._compute_importance_fallback(model, criterion)
+            
+    #         # Analyze importance distribution
+    #         score_analysis = self._analyze_importance_distribution(importance_scores)
+            
+    #         results = {
+    #             'success': True,
+    #             'criterion_used': criterion,
+    #             'importance_scores': importance_scores,
+    #             'score_analysis': score_analysis,
+    #             'total_layers_analyzed': len(importance_scores)
+    #         }
+            
+    #         logger.info(f"✅ Importance scores computed for {len(importance_scores)} layers")
+    #         return results
+
     def _compute_importance_scores(self, state: PruningState, 
                                  recommendations: Dict[str, Any]) -> Dict[str, Any]:
         """Compute importance scores for all prunable layers."""
@@ -414,17 +688,7 @@ class PruningAgent(BaseAgent):
                     logger.warning(f"⚠️ importance_config is unexpected type: {type(importance_config)}, using default")
                     criterion = 'l1norm'
             
-            # Prepare data for gradient-based criteria
-            data_loader = None
-            if criterion == 'taylor':
-                for attr_name in ['dataloader', 'train_loader', 'val_loader']:
-                    if hasattr(state, attr_name):
-                        data_loader = getattr(state, attr_name)
-                        break
-                
-                if data_loader is None:
-                    logger.warning("⚠️ No dataloader found for Taylor criterion, falling back to L1")
-                    criterion = 'l1norm'
+            data_loader = self._get_dataloader_for_importance(state, criterion)
             
             importance_scores = {}
             
@@ -433,27 +697,30 @@ class PruningAgent(BaseAgent):
                     for name, module in model.named_modules():
                         if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
                             try:
-                                # Get importance score from ImportanceCriteria
                                 score_result = self.importance_criteria.compute_importance(
-                                    model=model,
                                     layer=module,
                                     layer_name=name,
-                                    criterion=criterion
+                                    criterion=criterion,
+                                    model=model,
+                                    dataloader=data_loader  # Added dataloader parameter
                                 )
                                 
+                                # Extract numeric value from ImportanceScore object
                                 numeric_score = self._extract_numeric_score(score_result)
                                 importance_scores[name] = numeric_score
                                 
                             except TypeError as type_e:
                                 # Try different parameter combinations
                                 try:
-                                    # Try without model parameter
+                                    # Try without model parameter but with dataloader
                                     score_result = self.importance_criteria.compute_importance(
                                         layer=module,
                                         layer_name=name,
-                                        criterion=criterion
+                                        criterion=criterion,
+                                        dataloader=data_loader
                                     )
                                     
+                                    # Extract numeric value from ImportanceScore object
                                     numeric_score = self._extract_numeric_score(score_result)
                                     importance_scores[name] = numeric_score
                                     
@@ -491,7 +758,8 @@ class PruningAgent(BaseAgent):
                 'criterion_used': criterion,
                 'importance_scores': importance_scores,
                 'score_analysis': score_analysis,
-                'total_layers_analyzed': len(importance_scores)
+                'total_layers_analyzed': len(importance_scores),
+                'dataloader_used': data_loader is not None
             }
             
             logger.info(f"✅ Importance scores computed for {len(importance_scores)} layers")
