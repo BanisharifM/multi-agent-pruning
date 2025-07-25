@@ -194,69 +194,52 @@ class PruningAgent(BaseAgent):
             
             logger.info(f"✅ Checkpoint '{checkpoint_name}' created successfully")
 
+    def get_available_criteria(self) -> List[str]:
+        """Get list of all available importance criteria."""
+        
+        if self.importance_criteria is not None:
+            return list(self.importance_criteria.criteria.keys())
+        else:
+            # Return default criteria if ImportanceCriteria not initialized
+            return ['magnitude_l1', 'magnitude_l2', 'taylor', 'gradient', 'random']
+
+    def validate_criterion(self, criterion: str) -> bool:
+        """Validate if a criterion is available."""
+        
+        normalized_criterion = self._normalize_criterion_name(criterion)
+        available_criteria = self.get_available_criteria()
+        
+        is_valid = normalized_criterion in available_criteria
+        
+        if not is_valid:
+            logger.error(f"❌ Criterion '{criterion}' (normalized: '{normalized_criterion}') not available")
+            logger.info(f"📋 Available criteria: {available_criteria}")
+        
+        return is_valid
+
     def _initialize_pruning_components(self, state: PruningState):
         """Initialize pruning engine and importance criteria."""
         
-        with self.profiler.timer("pruning_components_initialization"):
-            model = state.model
-            model_name = getattr(state, 'model_name', 'unknown_model')
-
-            # Get recommendations from analysis
-            analysis_results = state.analysis_results
-            
-            if not isinstance(analysis_results, dict):
-                logger.error(f"❌ analysis_results is not a dict, got: {type(analysis_results)}")
-                raise ValueError(f"Expected dict for analysis_results, got {type(analysis_results)}")
-            
-            if 'strategic_recommendations' not in analysis_results:
-                logger.error(f"❌ Missing 'strategic_recommendations' in analysis_results. Available keys: {list(analysis_results.keys())}")
-                raise KeyError("Missing 'strategic_recommendations' in analysis_results")
-            
-            recommendations = analysis_results['strategic_recommendations']
-            
-            if not isinstance(recommendations, dict):
-                logger.error(f"❌ recommendations is not a dict, got: {type(recommendations)}")
-                raise ValueError(f"Expected dict for recommendations, got {type(recommendations)}")
-            
-            if 'importance_criterion' not in recommendations:
-                logger.warning("⚠️ Missing 'importance_criterion' in recommendations, using defaults")
-                primary_criterion = 'l1norm'
-                fallback_criterion = 'l2norm'
-            else:
-                importance_config = recommendations['importance_criterion']
+        try:
+            # Initialize ImportanceCriteria
+            if self.importance_criteria is None:
+                self.importance_criteria = ImportanceCriteria(cache_enabled=True)
+                logger.info("✅ ImportanceCriteria initialized")
                 
-                if isinstance(importance_config, str):
-                    logger.info(f"📝 importance_criterion is a string: {importance_config}")
-                    primary_criterion = importance_config
-                    fallback_criterion = 'l2norm'  # Default fallback
-                elif isinstance(importance_config, dict):
-                    primary_criterion = importance_config.get('primary_criterion', 'l1norm')
-                    fallback_criterion = importance_config.get('fallback_criterion', 'l2norm')
-                else:
-                    logger.warning(f"⚠️ importance_config is unexpected type: {type(importance_config)}, using defaults")
-                    primary_criterion = 'l1norm'
-                    fallback_criterion = 'l2norm'
+                # Log available criteria for debugging
+                available_criteria = self.get_available_criteria()
+                logger.info(f"📋 Available importance criteria: {available_criteria}")
             
-            try:
-                # Try with no parameters first (most likely correct based on errors)
-                self.importance_criteria = ImportanceCriteria()
-                logger.info("✅ ImportanceCriteria initialized with no parameters")
-            except Exception as e:
-                logger.error(f"❌ Failed to initialize ImportanceCriteria: {e}")
-                # Set to None and use fallback computation
-                self.importance_criteria = None
-            
-            # Store criteria for later use
-            self.primary_criterion = primary_criterion
-            self.fallback_criterion = fallback_criterion
-            
-            # Initialize pruning engine
-            self.pruning_engine = PruningEngine(
-                model=model,
-                model_name=model_name
-            )
+            # Initialize PruningEngine
+            if self.pruning_engine is None:
+                self.pruning_engine = PruningEngine(state.model)
+                logger.info("✅ PruningEngine initialized")
             
             logger.info("🔧 Pruning components initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize pruning components: {str(e)}")
+            raise
 
     def _execute_pruning_pipeline(self, state: PruningState) -> Dict[str, Any]:
         """Execute the complete pruning pipeline."""
@@ -316,19 +299,23 @@ class PruningAgent(BaseAgent):
         
         weight = layer.weight.data
         
+        normalized_criterion = self._normalize_criterion_name(criterion)
+        
         try:
-            if criterion == 'l1norm':
+            if normalized_criterion == 'magnitude_l1':
                 score = torch.norm(weight, p=1).item()
-            elif criterion == 'l2norm':
+            elif normalized_criterion == 'magnitude_l2':
                 score = torch.norm(weight, p=2).item()
-            elif criterion == 'magnitude':
-                score = torch.mean(torch.abs(weight)).item()
-            elif criterion == 'variance':
-                score = torch.var(weight).item()
-            elif criterion == 'std':
-                score = torch.std(weight).item()
+            elif normalized_criterion in ['taylor', 'gradient']:
+                # For gradient-based criteria, fall back to magnitude
+                logger.debug(f"📊 Gradient-based criterion {normalized_criterion} falling back to L2 magnitude")
+                score = torch.norm(weight, p=2).item()
+            elif normalized_criterion == 'random':
+                # Random importance
+                score = torch.rand(1).item()
             else:
-                # Default to L1 norm
+                # Default to L1 norm for unknown criteria
+                logger.debug(f"📊 Unknown criterion {normalized_criterion}, using L1 magnitude")
                 score = torch.norm(weight, p=1).item()
             
             # Ensure the result is a finite float
@@ -465,7 +452,6 @@ class PruningAgent(BaseAgent):
         try:
             model = state.model
             
-            # FIXED: Determine device from model parameters
             model_device = next(model.parameters()).device
             logger.debug(f"📊 Model device: {model_device}")
             
@@ -480,7 +466,6 @@ class PruningAgent(BaseAgent):
             num_samples = 32  # Small number of samples
             num_classes = self._infer_num_classes(model)
             
-            # FIXED: Generate random data on the same device as the model
             dummy_inputs = torch.randn(num_samples, *input_shape, device=model_device)
             dummy_targets = torch.randint(0, num_classes, (num_samples,), device=model_device)
             
@@ -555,13 +540,16 @@ class PruningAgent(BaseAgent):
     def _get_dataloader_for_importance(self, state: PruningState, criterion: str) -> Optional[torch.utils.data.DataLoader]:
         """Get or create a dataloader for importance computation."""
         
-        # Check if criterion needs a dataloader
         gradient_based_criteria = ['taylor', 'gradient', 'fisher', 'snip']
-        if criterion.lower() not in gradient_based_criteria:
-            logger.debug(f"📊 Criterion '{criterion}' doesn't require dataloader")
+        
+        # Normalize criterion for checking
+        normalized_criterion = self._normalize_criterion_name(criterion)
+        
+        if normalized_criterion.lower() not in gradient_based_criteria:
+            logger.debug(f"📊 Criterion '{normalized_criterion}' doesn't require dataloader")
             return None
         
-        # FIXED: Get model device for device-aware dataloader creation
+        # Get model device for device-aware dataloader creation
         model_device = next(state.model.parameters()).device
         
         # Try to find existing dataloader in state
@@ -570,7 +558,6 @@ class PruningAgent(BaseAgent):
                 data_loader = getattr(state, attr_name)
                 if data_loader is not None:
                     logger.info(f"📊 Using existing dataloader from state.{attr_name}")
-                    # Ensure device compatibility
                     return self._ensure_dataloader_device_compatibility(data_loader, model_device)
         
         # Try to find dataloader in analysis results
@@ -580,7 +567,6 @@ class PruningAgent(BaseAgent):
                 data_loader = analysis_results['dataloader']
                 if data_loader is not None:
                     logger.info("📊 Using dataloader from analysis results")
-                    # Ensure device compatibility
                     return self._ensure_dataloader_device_compatibility(data_loader, model_device)
         
         # Try to create a dummy dataloader if we have dataset information
@@ -590,8 +576,54 @@ class PruningAgent(BaseAgent):
             return dummy_loader
         
         # No dataloader available
-        logger.warning(f"⚠️ No dataloader available for {criterion} criterion, will fall back to magnitude-based")
+        logger.warning(f"⚠️ No dataloader available for {normalized_criterion} criterion, will fall back to magnitude-based")
         return None
+
+    def _normalize_criterion_name(self, criterion: str) -> str:
+        """Normalize criterion names to match ImportanceCriteria expectations."""
+        
+        # Mapping from common names to ImportanceCriteria names
+        criterion_mapping = {
+            # Magnitude-based criteria
+            'l1norm': 'magnitude_l1',
+            'l1': 'magnitude_l1',
+            'magnitude_l1': 'magnitude_l1',  # Already correct
+            
+            'l2norm': 'magnitude_l2',
+            'l2': 'magnitude_l2', 
+            'magnitude_l2': 'magnitude_l2',  # Already correct
+            
+            'magnitude': 'magnitude_l1',  # Default to L1
+            
+            # Gradient-based criteria
+            'taylor': 'taylor',  # Already correct
+            'gradient': 'gradient',  # Already correct
+            'grad': 'gradient',
+            
+            # Random criteria
+            'random': 'random',  # Already correct
+            'uniform': 'random',
+            
+            # Additional common aliases
+            'weight_magnitude': 'magnitude_l1',
+            'abs_weight': 'magnitude_l1',
+            'norm': 'magnitude_l2',
+            'euclidean': 'magnitude_l2',
+            'manhattan': 'magnitude_l1'
+        }
+        
+        # Normalize to lowercase for case-insensitive matching
+        criterion_lower = criterion.lower().strip()
+        
+        if criterion_lower in criterion_mapping:
+            normalized = criterion_mapping[criterion_lower]
+            if normalized != criterion:
+                logger.info(f"📊 Normalized criterion '{criterion}' → '{normalized}'")
+            return normalized
+        else:
+            # If not found in mapping, return as-is and let ImportanceCriteria handle the error
+            logger.warning(f"⚠️ Unknown criterion '{criterion}', passing through unchanged")
+            return criterion
 
     def _compute_importance_scores(self, state: PruningState, 
                                  recommendations: Dict[str, Any]) -> Dict[str, Any]:
@@ -616,6 +648,9 @@ class PruningAgent(BaseAgent):
                     logger.warning(f"⚠️ importance_config is unexpected type: {type(importance_config)}, using default")
                     criterion = 'l1norm'
             
+            criterion = self._normalize_criterion_name(criterion)
+            logger.info(f"📊 Using importance criterion: {criterion}")
+            
             data_loader = self._get_dataloader_for_importance(state, criterion)
             
             importance_scores = {}
@@ -630,7 +665,7 @@ class PruningAgent(BaseAgent):
                                     layer_name=name,
                                     criterion=criterion,
                                     model=model,
-                                    dataloader=data_loader  # Added dataloader parameter
+                                    dataloader=data_loader
                                 )
                                 
                                 # Extract numeric value from ImportanceScore object
@@ -640,7 +675,6 @@ class PruningAgent(BaseAgent):
                             except TypeError as type_e:
                                 # Try different parameter combinations
                                 try:
-                                    # Try without model parameter but with dataloader
                                     score_result = self.importance_criteria.compute_importance(
                                         layer=module,
                                         layer_name=name,
@@ -648,18 +682,15 @@ class PruningAgent(BaseAgent):
                                         dataloader=data_loader
                                     )
                                     
-                                    # Extract numeric value from ImportanceScore object
                                     numeric_score = self._extract_numeric_score(score_result)
                                     importance_scores[name] = numeric_score
                                     
                                 except Exception as fallback_e:
                                     logger.warning(f"⚠️ Failed to compute importance for layer {name}: {fallback_e}")
-                                    # Use fallback computation for this layer
                                     score = self._compute_layer_importance_fallback(module, criterion)
                                     importance_scores[name] = score
                             except Exception as layer_e:
                                 logger.warning(f"⚠️ Failed to compute importance for layer {name}: {layer_e}")
-                                # Use fallback computation for this layer
                                 score = self._compute_layer_importance_fallback(module, criterion)
                                 importance_scores[name] = score
                     
@@ -671,10 +702,8 @@ class PruningAgent(BaseAgent):
                         
                 except Exception as e:
                     logger.warning(f"⚠️ ImportanceCriteria computation failed: {str(e)}")
-                    # Fall back to manual computation
                     importance_scores = self._compute_importance_fallback(model, criterion)
             else:
-                # ImportanceCriteria is None, use fallback
                 logger.info("📊 Using fallback importance computation")
                 importance_scores = self._compute_importance_fallback(model, criterion)
             

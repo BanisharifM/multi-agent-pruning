@@ -152,7 +152,6 @@ class TaylorCriterion(ImportanceCriterion):
         if start_time:
             start_time.record()
         
-        # FIXED: Determine device from model parameters
         model_device = next(model.parameters()).device
         logger.debug(f"🎯 Model device for {layer_name}: {model_device}")
         
@@ -168,7 +167,6 @@ class TaylorCriterion(ImportanceCriterion):
                 if samples_processed >= self.num_samples:
                     break
                 
-                # FIXED: Move data to the same device as the model
                 data = data.to(model_device)
                 target = target.to(model_device)
                 
@@ -266,7 +264,6 @@ class GradientCriterion(ImportanceCriterion):
         if start_time:
             start_time.record()
         
-        # FIXED: Determine device from model parameters
         model_device = next(model.parameters()).device
         
         model.train()  # Set to training mode for gradient computation
@@ -279,7 +276,6 @@ class GradientCriterion(ImportanceCriterion):
                 if samples_processed >= self.num_samples:
                     break
                 
-                # FIXED: Move data to the same device as the model
                 data = data.to(model_device)
                 target = target.to(model_device)
                 
