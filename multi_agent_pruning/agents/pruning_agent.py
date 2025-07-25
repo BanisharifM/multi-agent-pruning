@@ -465,6 +465,10 @@ class PruningAgent(BaseAgent):
         try:
             model = state.model
             
+            # FIXED: Determine device from model parameters
+            model_device = next(model.parameters()).device
+            logger.debug(f"📊 Model device: {model_device}")
+            
             # Determine input shape from model
             input_shape = self._infer_input_shape(model)
             if input_shape is None:
@@ -476,9 +480,9 @@ class PruningAgent(BaseAgent):
             num_samples = 32  # Small number of samples
             num_classes = self._infer_num_classes(model)
             
-            # Generate random data
-            dummy_inputs = torch.randn(num_samples, *input_shape)
-            dummy_targets = torch.randint(0, num_classes, (num_samples,))
+            # FIXED: Generate random data on the same device as the model
+            dummy_inputs = torch.randn(num_samples, *input_shape, device=model_device)
+            dummy_targets = torch.randint(0, num_classes, (num_samples,), device=model_device)
             
             # Create dataset and dataloader
             dummy_dataset = torch.utils.data.TensorDataset(dummy_inputs, dummy_targets)
@@ -489,12 +493,64 @@ class PruningAgent(BaseAgent):
                 drop_last=False
             )
             
-            logger.info(f"📊 Created dummy dataloader: {num_samples} samples, batch_size={batch_size}")
+            logger.info(f"📊 Created dummy dataloader: {num_samples} samples, batch_size={batch_size}, device={model_device}")
             return dummy_dataloader
             
         except Exception as e:
             logger.warning(f"⚠️ Failed to create dummy dataloader: {e}")
             return None
+
+    def _ensure_dataloader_device_compatibility(self, dataloader: torch.utils.data.DataLoader, 
+                                               model_device: torch.device) -> torch.utils.data.DataLoader:
+        """Ensure dataloader tensors are compatible with model device."""
+        
+        if dataloader is None:
+            return None
+        
+        try:
+            # Check if the dataloader already produces tensors on the correct device
+            sample_batch = next(iter(dataloader))
+            if isinstance(sample_batch, (list, tuple)) and len(sample_batch) >= 2:
+                sample_data, sample_target = sample_batch[0], sample_batch[1]
+                
+                # If data is already on the correct device, return as-is
+                if hasattr(sample_data, 'device') and sample_data.device == model_device:
+                    logger.debug(f"📊 Dataloader already produces tensors on {model_device}")
+                    return dataloader
+            
+            # Create a device-aware wrapper
+            class DeviceAwareDataLoader:
+                def __init__(self, original_loader, target_device):
+                    self.original_loader = original_loader
+                    self.target_device = target_device
+                
+                def __iter__(self):
+                    for batch in self.original_loader:
+                        if isinstance(batch, (list, tuple)):
+                            # Move each tensor in the batch to the target device
+                            moved_batch = []
+                            for item in batch:
+                                if hasattr(item, 'to'):
+                                    moved_batch.append(item.to(self.target_device))
+                                else:
+                                    moved_batch.append(item)
+                            yield tuple(moved_batch) if isinstance(batch, tuple) else moved_batch
+                        else:
+                            # Single tensor batch
+                            if hasattr(batch, 'to'):
+                                yield batch.to(self.target_device)
+                            else:
+                                yield batch
+                
+                def __len__(self):
+                    return len(self.original_loader)
+            
+            logger.info(f"📊 Created device-aware dataloader wrapper for {model_device}")
+            return DeviceAwareDataLoader(dataloader, model_device)
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to create device-aware dataloader: {e}")
+            return dataloader
 
     def _get_dataloader_for_importance(self, state: PruningState, criterion: str) -> Optional[torch.utils.data.DataLoader]:
         """Get or create a dataloader for importance computation."""
@@ -505,13 +561,17 @@ class PruningAgent(BaseAgent):
             logger.debug(f"📊 Criterion '{criterion}' doesn't require dataloader")
             return None
         
+        # FIXED: Get model device for device-aware dataloader creation
+        model_device = next(state.model.parameters()).device
+        
         # Try to find existing dataloader in state
         for attr_name in ['dataloader', 'train_loader', 'val_loader', 'test_loader', 'data_loader']:
             if hasattr(state, attr_name):
                 data_loader = getattr(state, attr_name)
                 if data_loader is not None:
                     logger.info(f"📊 Using existing dataloader from state.{attr_name}")
-                    return data_loader
+                    # Ensure device compatibility
+                    return self._ensure_dataloader_device_compatibility(data_loader, model_device)
         
         # Try to find dataloader in analysis results
         if hasattr(state, 'analysis_results') and isinstance(state.analysis_results, dict):
@@ -520,7 +580,8 @@ class PruningAgent(BaseAgent):
                 data_loader = analysis_results['dataloader']
                 if data_loader is not None:
                     logger.info("📊 Using dataloader from analysis results")
-                    return data_loader
+                    # Ensure device compatibility
+                    return self._ensure_dataloader_device_compatibility(data_loader, model_device)
         
         # Try to create a dummy dataloader if we have dataset information
         dummy_loader = self._create_dummy_dataloader(state)

@@ -152,6 +152,10 @@ class TaylorCriterion(ImportanceCriterion):
         if start_time:
             start_time.record()
         
+        # FIXED: Determine device from model parameters
+        model_device = next(model.parameters()).device
+        logger.debug(f"🎯 Model device for {layer_name}: {model_device}")
+        
         # Set model to evaluation mode
         model.eval()
         
@@ -164,8 +168,9 @@ class TaylorCriterion(ImportanceCriterion):
                 if samples_processed >= self.num_samples:
                     break
                 
-                data = data.cuda() if torch.cuda.is_available() else data
-                target = target.cuda() if torch.cuda.is_available() else target
+                # FIXED: Move data to the same device as the model
+                data = data.to(model_device)
+                target = target.to(model_device)
                 
                 # Forward pass
                 output = model(data)
@@ -233,7 +238,8 @@ class TaylorCriterion(ImportanceCriterion):
             metadata={
                 'num_samples': samples_processed,
                 'layer_type': type(layer).__name__,
-                'method': 'first_order_taylor'
+                'method': 'first_order_taylor',
+                'device': str(model_device)
             }
         )
 
@@ -260,6 +266,9 @@ class GradientCriterion(ImportanceCriterion):
         if start_time:
             start_time.record()
         
+        # FIXED: Determine device from model parameters
+        model_device = next(model.parameters()).device
+        
         model.train()  # Set to training mode for gradient computation
         
         accumulated_gradients = None
@@ -270,8 +279,9 @@ class GradientCriterion(ImportanceCriterion):
                 if samples_processed >= self.num_samples:
                     break
                 
-                data = data.cuda() if torch.cuda.is_available() else data
-                target = target.cuda() if torch.cuda.is_available() else target
+                # FIXED: Move data to the same device as the model
+                data = data.to(model_device)
+                target = target.to(model_device)
                 
                 # Forward pass
                 output = model(data)
@@ -312,12 +322,12 @@ class GradientCriterion(ImportanceCriterion):
                 return fallback.compute_importance(layer, layer_name, model, **kwargs)
         
         except Exception as e:
-            logger.error(f"Error computing gradient importance for {layer_name}: {str(e)}")
+            logger.error(f"Error computing Gradient importance for {layer_name}: {str(e)}")
             fallback = MagnitudeL2Criterion()
             return fallback.compute_importance(layer, layer_name, model, **kwargs)
         
         finally:
-            model.zero_grad()
+            model.zero_grad()  # Clean up gradients
         
         if end_time:
             end_time.record()
@@ -334,7 +344,8 @@ class GradientCriterion(ImportanceCriterion):
             metadata={
                 'num_samples': samples_processed,
                 'layer_type': type(layer).__name__,
-                'method': 'gradient_magnitude'
+                'method': 'gradient_accumulation',
+                'device': str(model_device)
             }
         )
 
