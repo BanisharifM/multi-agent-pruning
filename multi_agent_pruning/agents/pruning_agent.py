@@ -225,7 +225,6 @@ class PruningAgent(BaseAgent):
             primary_criterion = importance_config.get('primary_criterion', 'l1norm')
             fallback_criterion = importance_config.get('fallback_criterion', 'l2norm')
             
-            # FIXED: Initialize importance criteria without 'criterion' parameter
             # The ImportanceCriteria class likely expects different parameter names
             try:
                 # Try the correct initialization pattern
@@ -358,7 +357,6 @@ class PruningAgent(BaseAgent):
             
             # Compute importance scores
             try:
-                # FIXED: Use the correct method call for compute_importance
                 # Check if the method expects different parameters
                 if hasattr(self.importance_criteria, 'compute_importance'):
                     try:
@@ -424,6 +422,48 @@ class PruningAgent(BaseAgent):
                     'total_layers_analyzed': len(importance_scores)
                 }
 
+    def _get_target_ratio(self, state: PruningState, fallback: float = 0.5) -> float:
+        """Safely get target ratio from state with multiple fallback strategies."""
+        
+        # Try different attribute names
+        for attr_name in ['target_ratio', 'target_pruning_ratio', 'pruning_ratio']:
+            if hasattr(state, attr_name):
+                ratio = getattr(state, attr_name)
+                if ratio is not None and 0.0 < ratio <= 1.0:
+                    return ratio
+        
+        # Try to extract from query string
+        if hasattr(state, 'query') and isinstance(state.query, str):
+            import re
+            # Look for percentage format
+            ratio_match = re.search(r'(\d+\.?\d*)%', state.query)
+            if ratio_match:
+                ratio = float(ratio_match.group(1)) / 100.0
+                if 0.0 < ratio <= 1.0:
+                    return ratio
+            
+            # Look for decimal format
+            decimal_match = re.search(r'(\d+\.?\d*)', state.query)
+            if decimal_match:
+                potential_ratio = float(decimal_match.group(1))
+                if 0.0 < potential_ratio <= 1.0:
+                    return potential_ratio
+                elif 1.0 < potential_ratio <= 100.0:
+                    return potential_ratio / 100.0
+        
+        # Try to get from analysis results
+        if hasattr(state, 'analysis_results') and isinstance(state.analysis_results, dict):
+            analysis_results = state.analysis_results
+            strategic_recs = analysis_results.get('strategic_recommendations', {})
+            if isinstance(strategic_recs, dict):
+                ratio = strategic_recs.get('target_ratio') or strategic_recs.get('pruning_ratio')
+                if ratio is not None and 0.0 < ratio <= 1.0:
+                    return ratio
+        
+        # Final fallback
+        logger.warning(f"⚠️ Could not determine target ratio, using fallback: {fallback}")
+        return fallback
+
     def _apply_structured_pruning(self, state: PruningState, recommendations: Dict[str, Any],
                                 importance_results: Dict[str, Any]) -> Dict[str, Any]:
         """Apply structured pruning based on importance scores and recommendations."""
@@ -433,10 +473,42 @@ class PruningAgent(BaseAgent):
             
             model = state.model
             
-            target_ratio = getattr(state, 'target_ratio', None)
+            target_ratio = None
+            
+            # Try different attribute names
+            for attr_name in ['target_ratio', 'target_pruning_ratio', 'pruning_ratio']:
+                if hasattr(state, attr_name):
+                    target_ratio = getattr(state, attr_name)
+                    break
+            
+            # If still None, try to get from other sources
             if target_ratio is None:
-                target_ratio = getattr(state, 'target_pruning_ratio', 0.5)
-                logger.warning(f"⚠️ Using fallback target_ratio: {target_ratio}")
+                # Try to get from query string
+                if hasattr(state, 'query') and isinstance(state.query, str):
+                    import re
+                    ratio_match = re.search(r'(\d+\.?\d*)%', state.query)
+                    if ratio_match:
+                        target_ratio = float(ratio_match.group(1)) / 100.0
+                    else:
+                        # Try to find decimal format
+                        decimal_match = re.search(r'(\d+\.?\d*)', state.query)
+                        if decimal_match:
+                            potential_ratio = float(decimal_match.group(1))
+                            if 0.0 < potential_ratio <= 1.0:
+                                target_ratio = potential_ratio
+                            elif potential_ratio > 1.0 and potential_ratio <= 100.0:
+                                target_ratio = potential_ratio / 100.0
+                
+                # Try to get from recommendations
+                if target_ratio is None and isinstance(recommendations, dict):
+                    target_ratio = recommendations.get('target_ratio', None)
+                    if target_ratio is None:
+                        target_ratio = recommendations.get('pruning_ratio', None)
+                
+                # Final fallback
+                if target_ratio is None:
+                    target_ratio = 0.5  # Default 50% pruning
+                    logger.warning(f"⚠️ Could not find target_ratio, using default: {target_ratio}")
             
             importance_scores = importance_results['importance_scores']
             
@@ -457,8 +529,6 @@ class PruningAgent(BaseAgent):
             
             # Apply pruning using the engine
             try:
-                # Instead, use the existing pruning engine methods
-                
                 # Calculate achieved metrics first
                 original_params = sum(p.numel() for p in model.parameters())
                 
@@ -491,7 +561,7 @@ class PruningAgent(BaseAgent):
             except Exception as e:
                 logger.error(f"❌ Structured pruning failed: {str(e)}")
                 raise
-    
+
     def _validate_constraints(self, state: PruningState, 
                             pruning_results: Dict[str, Any]) -> Dict[str, Any]:
         """Validate that all constraints are satisfied after pruning."""
@@ -1025,7 +1095,49 @@ class PruningAgent(BaseAgent):
         """Create prompt for LLM validation."""
         
         model_name = getattr(state, 'model_name', 'unknown')
-        target_ratio = state.target_pruning_ratio
+        
+        target_ratio = None
+        
+        # Try different attribute names that might contain the target ratio
+        for attr_name in ['target_ratio', 'target_pruning_ratio', 'pruning_ratio']:
+            if hasattr(state, attr_name):
+                target_ratio = getattr(state, attr_name)
+                break
+        
+        # If still None, try to get from other sources
+        if target_ratio is None:
+            # Try to get from query string if available
+            if hasattr(state, 'query') and isinstance(state.query, str):
+                import re
+                ratio_match = re.search(r'(\d+\.?\d*)%', state.query)
+                if ratio_match:
+                    target_ratio = float(ratio_match.group(1)) / 100.0
+                else:
+                    # Try to find decimal format like 0.5
+                    decimal_match = re.search(r'(\d+\.?\d*)', state.query)
+                    if decimal_match:
+                        potential_ratio = float(decimal_match.group(1))
+                        if 0.0 < potential_ratio <= 1.0:
+                            target_ratio = potential_ratio
+                        elif potential_ratio > 1.0 and potential_ratio <= 100.0:
+                            target_ratio = potential_ratio / 100.0
+            
+            # Try to get from analysis results
+            if target_ratio is None and hasattr(state, 'analysis_results'):
+                analysis_results = state.analysis_results
+                if isinstance(analysis_results, dict):
+                    # Check strategic recommendations
+                    strategic_recs = analysis_results.get('strategic_recommendations', {})
+                    if isinstance(strategic_recs, dict):
+                        target_ratio = strategic_recs.get('target_ratio', None)
+                        if target_ratio is None:
+                            target_ratio = strategic_recs.get('pruning_ratio', None)
+            
+            # Final fallback
+            if target_ratio is None:
+                target_ratio = 0.5  # Default 50% pruning ratio
+                logger.warning(f"⚠️ Could not find target_ratio in state, using default: {target_ratio}")
+        
         achieved_ratio = pruning_results['achieved_pruning_ratio']
         
         prompt = f"""
