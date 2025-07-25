@@ -494,6 +494,36 @@ class PruningAgent(BaseAgent):
             
             return validation_summary
     
+    def _validate_safety_limits(self, state: PruningState) -> bool:
+        """Validate that target ratio is within safety limits."""
+        
+        target_ratio = state.target_ratio
+        model_name = state.model_name
+        dataset = state.dataset
+        
+        # Define conservative safety limits
+        safety_limits = {
+            ('deit_small', 'imagenet'): 0.35,  # Max 35% for DeiT-Small on ImageNet
+            ('deit_base', 'imagenet'): 0.30,   # Max 30% for DeiT-Base on ImageNet
+            ('resnet50', 'imagenet'): 0.60,    # Max 60% for ResNet50 on ImageNet
+            ('default', 'imagenet'): 0.40,     # Default max 40% for ImageNet
+            ('default', 'cifar10'): 0.70,      # Default max 70% for CIFAR-10
+        }
+        
+        # Get applicable limit
+        key = (model_name.lower(), dataset.lower())
+        if key not in safety_limits:
+            key = ('default', dataset.lower())
+        if key not in safety_limits:
+            key = ('default', 'imagenet')  # Most conservative fallback
+        
+        max_safe_ratio = safety_limits[key]
+        
+        if target_ratio > max_safe_ratio:
+            logger.error(f"❌ Target ratio {target_ratio:.1%} exceeds safety limit {max_safe_ratio:.1%} for {model_name} on {dataset}")
+            return False
+        
+        return True
     def _get_llm_validation(self, state: PruningState, pruning_results: Dict[str, Any],
                           validation_results: Dict[str, Any]) -> Dict[str, Any]:
         """Get LLM-based validation of pruning results."""
