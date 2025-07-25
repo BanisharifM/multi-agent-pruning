@@ -75,6 +75,25 @@ class PruningAgent(BaseAgent):
         
         logger.info("✂️ Pruning Agent components initialized with configuration")
 
+    def _check_if_model_already_pruned(self, state: PruningState) -> bool:
+        """Check if the model has already been pruned."""
+        
+        # Check if pruning results already exist
+        if hasattr(state, 'pruning_results') and state.pruning_results:
+            logger.warning("⚠️ Model appears to already be pruned - will re-prune")
+            return True
+        
+        # Check if model has been modified from original
+        if hasattr(state, 'original_model_complexity'):
+            current_complexity = compute_model_complexity(state.model)
+            original_complexity = state.original_model_complexity
+            
+            if current_complexity['total_params'] < original_complexity['total_params']:
+                logger.warning("⚠️ Model parameter count is reduced - may already be pruned")
+                return True
+        
+        return False
+
     def execute(self, state: PruningState) -> Dict[str, Any]:
         """
         Execute pruning phase: apply structured pruning with safety checks.
@@ -90,9 +109,17 @@ class PruningAgent(BaseAgent):
             logger.info("✂️ Starting Pruning Agent execution")
             
             try:
-                # Validate input state
                 if not self._validate_input_state(state):
                     return self._create_error_result("Invalid input state for pruning")
+                
+                # Check if model is already pruned
+                if self._check_if_model_already_pruned(state):
+                    logger.info("ℹ️ Model may already be pruned, continuing with re-pruning")
+                
+                # Store original model complexity for comparison
+                if not hasattr(state, 'original_model_complexity'):
+                    state.original_model_complexity = compute_model_complexity(state.model)
+                    logger.info(f"📊 Original model: {state.original_model_complexity['total_params']:,} parameters")
                 
                 # Create checkpoint before pruning
                 self._create_checkpoint(state, "pre_pruning")
@@ -102,6 +129,10 @@ class PruningAgent(BaseAgent):
                 
                 # Execute pruning pipeline
                 pruning_results = self._execute_pruning_pipeline(state)
+                
+                if not pruning_results or not pruning_results.get('success', False):
+                    logger.error("❌ Pruning pipeline failed")
+                    return self._create_error_result("Pruning pipeline execution failed")
                 
                 # Validate pruned model
                 validation_results = self._validate_pruned_model(state, pruning_results)
@@ -120,9 +151,8 @@ class PruningAgent(BaseAgent):
                     'next_agent': 'FinetuningAgent'
                 }
                 
-                # Update state with pruned model
-                state.model = pruning_results['pruned_model']
                 state.pruning_results = pruning_results
+                state.model = pruning_results.get('pruned_model', state.model)
                 
                 # Store results
                 self.pruning_results = pruning_results
@@ -132,14 +162,7 @@ class PruningAgent(BaseAgent):
                 
             except Exception as e:
                 logger.error(f"❌ Pruning Agent execution failed: {str(e)}")
-                
-                # Attempt recovery
-                recovery_result = self._attempt_recovery(state, str(e))
-                
-                return self._create_error_result(
-                    f"Pruning execution failed: {str(e)}",
-                    recovery_info=recovery_result
-                )
+                return self._create_error_result(f"Pruning execution failed: {str(e)}")
 
     def _get_training_dataloader(self, state: PruningState) -> Optional[DataLoader]:
         """Get training dataloader from state with multiple fallback options."""
@@ -198,30 +221,38 @@ class PruningAgent(BaseAgent):
         return None
 
     def _validate_input_state(self, state: PruningState) -> bool:
-        """Validate that the input state contains required pruning results."""
+        """Validate that the input state contains required data for pruning."""
         
-        required_fields = ['model', 'pruning_results']
+        required_fields = ['model']  # Removed 'pruning_results' - we CREATE this
         
         for field in required_fields:
             if not hasattr(state, field) or getattr(state, field) is None:
                 logger.error(f"❌ Missing required field in state: {field}")
                 return False
         
-        # Check if model is pruned
-        if not hasattr(state, 'pruning_results') or not state.pruning_results:
-            logger.error("❌ No pruning results found - model may not be pruned")
-            return False
+        # Check for analysis results (from previous agents)
+        if not hasattr(state, 'analysis_results') or not state.analysis_results:
+            logger.warning("⚠️ No analysis results found - will use default pruning strategy")
+        else:
+            logger.info("✅ Analysis results found")
         
+        # Check for profiling results (from profiling agent)
+        if not hasattr(state, 'profiling_results') or not state.profiling_results:
+            logger.warning("⚠️ No profiling results found - will use basic profiling")
+        else:
+            logger.info("✅ Profiling results found")
+        
+        # Check for dataloaders (needed for gradient-based importance criteria)
         train_loader = self._get_training_dataloader(state)
         if train_loader is None:
-            logger.warning("⚠️ No training dataloader found - fine-tuning may be limited")
+            logger.info("ℹ️ No training dataloader found - will create dummy dataloader for gradient-based criteria")
         else:
             logger.info("✅ Training dataloader found")
         
         # Check for evaluation data
         eval_loader = self._get_evaluation_dataloader(state)
         if eval_loader is None:
-            logger.warning("⚠️ No evaluation dataloader found - validation may be limited")
+            logger.info("ℹ️ No evaluation dataloader found - will create dummy dataloader if needed")
         else:
             logger.info("✅ Evaluation dataloader found")
         
@@ -1685,27 +1716,75 @@ Please provide validation in JSON format:
                 'raw_response': response
             }
     
-    def _create_error_result(self, error_message: str, 
-                           recovery_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _create_error_result(self, error_message: str) -> Dict[str, Any]:
         """Create standardized error result."""
         
-        result = {
+        return {
             'success': False,
             'agent_name': self.agent_name,
             'timestamp': datetime.now().isoformat(),
             'error': error_message,
-            'next_agent': None
+            'error_type': 'pruning_agent_error',
+            'recovery_suggestions': [
+                "Check if model and analysis results are available",
+                "Verify importance criteria configuration",
+                "Check dataloader availability for gradient-based criteria",
+                "Review pruning target ratio (may be too aggressive)",
+                "Check model architecture compatibility"
+            ],
+            'debug_info': {
+                'has_model': hasattr(self, 'model') if hasattr(self, 'model') else False,
+                'has_importance_criteria': self.importance_criteria is not None,
+                'has_pruning_engine': self.pruning_engine is not None,
+                'available_criteria': self.get_available_criteria() if hasattr(self, 'get_available_criteria') else []
+            }
         }
-        
-        if recovery_info:
-            result['recovery_info'] = recovery_info
-        
-        return result
 
     def get_agent_role(self) -> str:
         """Return the role of this agent."""
         return "pruning_agent"
     
+    def _get_pruning_recommendations(self, state: PruningState) -> Dict[str, Any]:
+        """Get pruning recommendations from analysis results with fallbacks."""
+        
+        # Try to get from analysis results
+        if hasattr(state, 'analysis_results') and isinstance(state.analysis_results, dict):
+            analysis_results = state.analysis_results
+            
+            # Look for recommendations in various places
+            if 'recommendations' in analysis_results:
+                return analysis_results['recommendations']
+            elif 'pruning_recommendations' in analysis_results:
+                return analysis_results['pruning_recommendations']
+            elif 'strategic_recommendations' in analysis_results:
+                return analysis_results['strategic_recommendations']
+        
+        # Try to get from profiling results
+        if hasattr(state, 'profiling_results') and isinstance(state.profiling_results, dict):
+            profiling_results = state.profiling_results
+            
+            if 'recommended_ratios' in profiling_results:
+                return {
+                    'importance_criterion': 'magnitude_l1',
+                    'target_ratio': 0.5,
+                    'group_ratios': profiling_results['recommended_ratios']
+                }
+        
+        # Default fallback recommendations
+        logger.warning("⚠️ No recommendations found, using default pruning strategy")
+        return {
+            'importance_criterion': 'magnitude_l1',
+            'target_ratio': 0.5,
+            'group_ratios': {
+                'attention': 0.3,
+                'mlp': 0.5,
+                'embedding': 0.1,
+                'classifier': 0.0
+            },
+            'safety_checks': True,
+            'validate_constraints': True
+        }
+
     def get_system_prompt(self, context: Dict[str, Any]) -> str:
         """Generate system prompt for the pruning agent."""
         
