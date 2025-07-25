@@ -139,40 +139,90 @@ class PruningAgent(BaseAgent):
                     f"Pruning execution failed: {str(e)}",
                     recovery_info=recovery_result
                 )
-    
-    def _validate_input_state(self, state: PruningState) -> bool:
-        """Validate that the input state contains required analysis results."""
+
+    def _get_training_dataloader(self, state: PruningState) -> Optional[DataLoader]:
+        """Get training dataloader from state with multiple fallback options."""
         
-        required_fields = ['model', 'analysis_results']
+        # Try different attribute names for training dataloader
+        train_loader_attrs = [
+            'train_dataloader', 'train_loader', 'training_loader', 
+            'dataloader', 'data_loader'
+        ]
+        
+        for attr_name in train_loader_attrs:
+            if hasattr(state, attr_name):
+                loader = getattr(state, attr_name)
+                if loader is not None:
+                    logger.info(f"📊 Found training dataloader: state.{attr_name}")
+                    return loader
+        
+        # Try to find in nested attributes
+        if hasattr(state, 'analysis_results') and isinstance(state.analysis_results, dict):
+            for attr_name in train_loader_attrs:
+                if attr_name in state.analysis_results:
+                    loader = state.analysis_results[attr_name]
+                    if loader is not None:
+                        logger.info(f"📊 Found training dataloader in analysis_results.{attr_name}")
+                        return loader
+        
+        logger.warning("⚠️ No training dataloader found in state")
+        return None
+
+    def _get_evaluation_dataloader(self, state: PruningState) -> Optional[DataLoader]:
+        """Get evaluation dataloader from state with multiple fallback options."""
+        
+        # Try different attribute names for evaluation dataloader
+        eval_loader_attrs = [
+            'val_dataloader', 'val_loader', 'validation_loader',
+            'test_dataloader', 'test_loader', 'eval_dataloader', 'eval_loader'
+        ]
+        
+        for attr_name in eval_loader_attrs:
+            if hasattr(state, attr_name):
+                loader = getattr(state, attr_name)
+                if loader is not None:
+                    logger.info(f"📊 Found evaluation dataloader: state.{attr_name}")
+                    return loader
+        
+        # Try to find in nested attributes
+        if hasattr(state, 'analysis_results') and isinstance(state.analysis_results, dict):
+            for attr_name in eval_loader_attrs:
+                if attr_name in state.analysis_results:
+                    loader = state.analysis_results[attr_name]
+                    if loader is not None:
+                        logger.info(f"📊 Found evaluation dataloader in analysis_results.{attr_name}")
+                        return loader
+        
+        logger.warning("⚠️ No evaluation dataloader found in state")
+        return None
+
+    def _validate_input_state(self, state: PruningState) -> bool:
+        """Validate that the input state contains required pruning results."""
+        
+        required_fields = ['model', 'pruning_results']
         
         for field in required_fields:
             if not hasattr(state, field) or getattr(state, field) is None:
                 logger.error(f"❌ Missing required field in state: {field}")
                 return False
         
-        # Check analysis results structure
-        analysis_results = state.analysis_results
-        if not isinstance(analysis_results, dict):
-            logger.error("❌ Analysis results must be a dictionary")
+        # Check if model is pruned
+        if not hasattr(state, 'pruning_results') or not state.pruning_results:
+            logger.error("❌ No pruning results found - model may not be pruned")
             return False
         
-        required_analysis_fields = ['strategic_recommendations']
-        for field in required_analysis_fields:
-            if field not in analysis_results:
-                logger.error(f"❌ Missing required analysis field: {field}")
-                return False
-        
-        # Check for dataloader availability (informational)
-        has_dataloader = False
-        for attr_name in ['dataloader', 'train_loader', 'val_loader', 'test_loader']:
-            if hasattr(state, attr_name) and getattr(state, attr_name) is not None:
-                has_dataloader = True
-                break
-        
-        if not has_dataloader:
-            logger.info("ℹ️ No dataloader found in state - will create dummy dataloader for gradient-based criteria")
+        train_loader = self._get_training_dataloader(state)
+        if train_loader is None:
+            logger.warning("⚠️ No training dataloader found - fine-tuning may be limited")
         else:
-            logger.info("✅ Dataloader available for gradient-based importance criteria")
+            logger.info("✅ Training dataloader found")
+        
+        # Check for evaluation data
+        eval_loader = self._get_evaluation_dataloader(state)
+        if eval_loader is None:
+            logger.warning("⚠️ No evaluation dataloader found - validation may be limited")
+        else:
+            logger.info("✅ Evaluation dataloader found")
         
         logger.info("✅ Input state validation passed")
         return True
@@ -1074,43 +1124,64 @@ class PruningAgent(BaseAgent):
             with self.profiler.timer("llm_validation"):
                 response = None
                 
-                # Try different method names for LLM generation
-                if hasattr(self.llm_client, 'generate'):
-                    response = self.llm_client.generate(prompt)
-                elif hasattr(self.llm_client, 'chat'):
-                    response = self.llm_client.chat(prompt)
-                elif hasattr(self.llm_client, 'complete'):
-                    response = self.llm_client.complete(prompt)
-                elif hasattr(self.llm_client, 'invoke'):
-                    response = self.llm_client.invoke(prompt)
-                elif hasattr(self.llm_client, 'predict'):
-                    response = self.llm_client.predict(prompt)
-                elif callable(self.llm_client):
-                    # If the client itself is callable
-                    response = self.llm_client(prompt)
-                else:
-                    # Try to find any callable method
-                    for attr_name in dir(self.llm_client):
-                        if not attr_name.startswith('_'):
-                            attr = getattr(self.llm_client, attr_name)
-                            if callable(attr):
-                                try:
-                                    response = attr(prompt)
-                                    break
-                                except:
-                                    continue
-                
-                if response is None:
-                    raise ValueError("No suitable method found on LLM client")
+                try:
+                    # Try OpenAI-style chat completion
+                    if hasattr(self.llm_client, 'chat') and hasattr(self.llm_client.chat, 'completions'):
+                        response = self.llm_client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[{"role": "user", "content": prompt}],
+                            max_tokens=500,
+                            temperature=0.1
+                        )
+                        if hasattr(response, 'choices') and len(response.choices) > 0:
+                            response = response.choices[0].message.content
+                    
+                    # Try direct method calls
+                    elif hasattr(self.llm_client, 'generate') and callable(self.llm_client.generate):
+                        response = self.llm_client.generate(prompt)
+                    elif hasattr(self.llm_client, 'complete') and callable(self.llm_client.complete):
+                        response = self.llm_client.complete(prompt)
+                    elif hasattr(self.llm_client, 'invoke') and callable(self.llm_client.invoke):
+                        response = self.llm_client.invoke(prompt)
+                    elif hasattr(self.llm_client, 'predict') and callable(self.llm_client.predict):
+                        response = self.llm_client.predict(prompt)
+                    elif callable(self.llm_client):
+                        # If the client itself is callable
+                        response = self.llm_client(prompt)
+                    else:
+                        # Try to find any callable method that might work
+                        for attr_name in ['chat', 'generate', 'complete', 'invoke', 'predict', 'call']:
+                            if hasattr(self.llm_client, attr_name):
+                                attr = getattr(self.llm_client, attr_name)
+                                if callable(attr):
+                                    try:
+                                        response = attr(prompt)
+                                        break
+                                    except Exception as method_e:
+                                        logger.debug(f"Method {attr_name} failed: {method_e}")
+                                        continue
+                    
+                    if response is None:
+                        raise ValueError("No suitable method found on LLM client")
+                    
+                except Exception as llm_e:
+                    logger.warning(f"⚠️ LLM validation failed: {str(llm_e)}")
+                    return {
+                        'status': 'llm_error',
+                        'message': f'LLM validation failed: {str(llm_e)}',
+                        'fallback_validation': 'Using rule-based validation instead'
+                    }
                 
                 # Handle different response formats
                 if isinstance(response, dict):
-                    # Extract text from dict response
-                    response_text = response.get('text', response.get('content', response.get('response', str(response))))
-                elif hasattr(response, 'content'):
-                    response_text = response.content
-                elif hasattr(response, 'text'):
-                    response_text = response.text
+                    if 'content' in response:
+                        response_text = response['content']
+                    elif 'text' in response:
+                        response_text = response['text']
+                    elif 'message' in response:
+                        response_text = response['message']
+                    else:
+                        response_text = str(response)
                 else:
                     response_text = str(response)
                 
@@ -1123,10 +1194,9 @@ class PruningAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"⚠️ LLM validation failed: {str(e)}")
             return {
-                'status': 'llm_validation_failed',
-                'error': str(e),
-                'fallback_used': True,
-                'message': 'LLM validation unavailable, using rule-based validation'
+                'status': 'llm_error',
+                'message': f'LLM validation failed: {str(e)}',
+                'fallback_validation': 'Using rule-based validation instead'
             }
 
     def _attempt_recovery(self, state: PruningState, error_message: str) -> Dict[str, Any]:

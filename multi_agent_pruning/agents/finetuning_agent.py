@@ -322,47 +322,106 @@ class FinetuningAgent(BaseAgent):
             logger.info("✅ Fine-tuning pipeline execution completed")
             return pipeline_results
     
+    def _extract_evaluation_metrics(self, result) -> Dict[str, float]:
+        """Extract evaluation metrics from AccuracyTracker result with robust handling."""
+        
+        # Default values
+        metrics = {
+            'top1_accuracy': 0.0,
+            'top5_accuracy': 0.0,
+            'loss': float('inf'),
+            'total_samples': 0,
+            'inference_time': 0.0
+        }
+        
+        try:
+            # If result is a dictionary
+            if isinstance(result, dict):
+                for key in metrics.keys():
+                    if key in result:
+                        metrics[key] = float(result[key])
+                return metrics
+            
+            # If result is an object with attributes
+            if hasattr(result, 'top1_accuracy'):
+                metrics['top1_accuracy'] = float(result.top1_accuracy)
+            elif hasattr(result, 'accuracy'):
+                metrics['top1_accuracy'] = float(result.accuracy)
+            elif hasattr(result, 'acc'):
+                metrics['top1_accuracy'] = float(result.acc)
+            
+            if hasattr(result, 'top5_accuracy'):
+                metrics['top5_accuracy'] = float(result.top5_accuracy)
+            elif hasattr(result, 'top5'):
+                metrics['top5_accuracy'] = float(result.top5)
+            
+            if hasattr(result, 'loss'):
+                metrics['loss'] = float(result.loss)
+            elif hasattr(result, 'avg_loss'):
+                metrics['loss'] = float(result.avg_loss)
+            
+            if hasattr(result, 'total_samples'):
+                metrics['total_samples'] = int(result.total_samples)
+            elif hasattr(result, 'num_samples'):
+                metrics['total_samples'] = int(result.num_samples)
+            
+            if hasattr(result, 'inference_time'):
+                metrics['inference_time'] = float(result.inference_time)
+            elif hasattr(result, 'time'):
+                metrics['inference_time'] = float(result.time)
+            
+            return metrics
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error extracting metrics: {e}, using defaults")
+            return metrics
+
     def _evaluate_baseline_performance(self, state: PruningState) -> Dict[str, Any]:
-        """Evaluate baseline performance of pruned model before fine-tuning."""
+        """Evaluate baseline performance of the pruned model."""
         
         with self.profiler.timer("baseline_evaluation"):
             logger.info("📊 Evaluating baseline performance")
             
             model = state.model
             
-            # Use validation dataloader if available
-            eval_dataloader = getattr(state, 'val_dataloader', None)
-            if eval_dataloader is None:
-                eval_dataloader = getattr(state, 'test_dataloader', None)
+            eval_dataloader = self._get_evaluation_dataloader(state)
             
             if eval_dataloader is None:
                 logger.warning("⚠️ No evaluation dataloader available")
                 return {
-                    'accuracy': 0.0,
+                    'top1_accuracy': 0.0,
+                    'top5_accuracy': 0.0,
                     'loss': float('inf'),
+                    'total_samples': 0,
+                    'inference_time': 0.0,
                     'message': 'No evaluation data available'
                 }
             
-            # Evaluate model
-            self.accuracy_tracker.reset()
-            baseline_result = self.accuracy_tracker.evaluate_model(
-                model=model,
-                dataloader=eval_dataloader,
-                criterion=nn.CrossEntropyLoss(),
-                max_batches=50  # Limit for efficiency
-            )
-            
-            baseline_performance = {
-                'top1_accuracy': baseline_result.top1_accuracy,
-                'top5_accuracy': baseline_result.top5_accuracy,
-                'loss': baseline_result.loss,
-                'total_samples': baseline_result.total_samples,
-                'inference_time': baseline_result.inference_time
-            }
-            
-            logger.info(f"📊 Baseline performance: {baseline_result.top1_accuracy:.1%} accuracy")
-            return baseline_performance
-    
+            try:
+                self.accuracy_tracker.reset()
+                baseline_result = self.accuracy_tracker.evaluate_model(
+                    model=model,
+                    dataloader=eval_dataloader,
+                    criterion=nn.CrossEntropyLoss(),
+                    max_batches=50  # Limit for efficiency
+                )
+                
+                baseline_performance = self._extract_evaluation_metrics(baseline_result)
+                
+                logger.info(f"📊 Baseline performance: {baseline_performance['top1_accuracy']:.1%} accuracy")
+                return baseline_performance
+                
+            except Exception as e:
+                logger.error(f"❌ Baseline evaluation failed: {str(e)}")
+                return {
+                    'top1_accuracy': 0.0,
+                    'top5_accuracy': 0.0,
+                    'loss': float('inf'),
+                    'total_samples': 0,
+                    'inference_time': 0.0,
+                    'error': str(e)
+                }
+
     def _execute_training_loop(self, state: PruningState, 
                              config: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the main training loop."""
@@ -371,13 +430,18 @@ class FinetuningAgent(BaseAgent):
             logger.info("🏃 Starting training loop")
             
             model = state.model
-            train_dataloader = getattr(state, 'train_dataloader', None)
-            val_dataloader = getattr(state, 'val_dataloader', None)
+            
+            train_dataloader = self._get_training_dataloader(state)
+            val_dataloader = self._get_evaluation_dataloader(state)
             
             if train_dataloader is None:
                 logger.error("❌ No training dataloader available")
                 return {
                     'training_completed': False,
+                    'epochs_completed': 0,
+                    'best_accuracy': 0.0,
+                    'final_accuracy': 0.0,
+                    'training_history': [],
                     'error': 'No training data available'
                 }
             
@@ -398,78 +462,70 @@ class FinetuningAgent(BaseAgent):
             for epoch in range(config['epochs']):
                 epoch_start_time = datetime.now()
                 
-                # Training phase
+                # Training epoch
                 train_metrics = self._train_epoch(
                     model, train_dataloader, criterion, self.optimizer, device
                 )
                 
-                # Validation phase
+                # Validation epoch (if validation data available)
+                val_metrics = {}
                 if val_dataloader is not None:
                     val_metrics = self._validate_epoch(
                         model, val_dataloader, criterion, device
                     )
-                else:
-                    val_metrics = {'accuracy': 0.0, 'loss': float('inf')}
                 
-                # Learning rate scheduling
-                self.scheduler.step()
-                current_lr = self.optimizer.param_groups[0]['lr']
+                # Update learning rate
+                if self.scheduler:
+                    self.scheduler.step()
                 
-                # Record epoch results
-                epoch_result = {
+                # Track progress
+                epoch_metrics = {
                     'epoch': epoch + 1,
-                    'train_loss': train_metrics['loss'],
-                    'train_accuracy': train_metrics['accuracy'],
-                    'val_loss': val_metrics['loss'],
-                    'val_accuracy': val_metrics['accuracy'],
-                    'learning_rate': current_lr,
+                    'train_loss': train_metrics.get('loss', 0.0),
+                    'train_accuracy': train_metrics.get('accuracy', 0.0),
+                    'val_loss': val_metrics.get('loss', 0.0),
+                    'val_accuracy': val_metrics.get('accuracy', 0.0),
+                    'learning_rate': self.optimizer.param_groups[0]['lr'],
                     'epoch_time': (datetime.now() - epoch_start_time).total_seconds()
                 }
                 
-                self.training_history.append(epoch_result)
+                self.training_history.append(epoch_metrics)
                 epochs_completed = epoch + 1
                 
-                # Log progress
-                logger.info(f"Epoch {epoch + 1}/{config['epochs']}: "
-                           f"Train Loss: {train_metrics['loss']:.4f}, "
-                           f"Train Acc: {train_metrics['accuracy']:.1%}, "
-                           f"Val Acc: {val_metrics['accuracy']:.1%}, "
-                           f"LR: {current_lr:.2e}")
-                
-                # Early stopping check
-                if val_metrics['accuracy'] > best_accuracy:
-                    best_accuracy = val_metrics['accuracy']
+                # Check for improvement
+                current_accuracy = val_metrics.get('accuracy', train_metrics.get('accuracy', 0.0))
+                if current_accuracy > best_accuracy:
+                    best_accuracy = current_accuracy
                     best_model_state = model.state_dict().copy()
                     patience_counter = 0
                 else:
                     patience_counter += 1
                 
-                if patience_counter >= config['patience']:
-                    logger.info(f"🛑 Early stopping triggered after {epoch + 1} epochs")
+                # Early stopping
+                if self.enable_early_stopping and patience_counter >= self.patience:
+                    logger.info(f"🛑 Early stopping triggered after {epochs_completed} epochs")
                     break
                 
-                # Minimum learning rate check
-                if current_lr < config['min_lr']:
-                    logger.info(f"🛑 Minimum learning rate reached: {current_lr:.2e}")
-                    break
+                # Progress logging
+                if epoch % max(1, config['epochs'] // 10) == 0:
+                    logger.info(f"📊 Epoch {epoch + 1}/{config['epochs']}: "
+                              f"Train Loss: {train_metrics.get('loss', 0.0):.4f}, "
+                              f"Val Acc: {current_accuracy:.1%}")
             
             # Restore best model
             if best_model_state is not None:
                 model.load_state_dict(best_model_state)
                 logger.info(f"✅ Restored best model with {best_accuracy:.1%} accuracy")
             
-            training_results = {
+            return {
                 'training_completed': True,
                 'epochs_completed': epochs_completed,
                 'best_accuracy': best_accuracy,
-                'final_learning_rate': current_lr,
-                'early_stopping_triggered': patience_counter >= config['patience'],
+                'final_accuracy': best_accuracy,
+                'training_history': self.training_history,
                 'total_training_time': sum(h['epoch_time'] for h in self.training_history)
             }
-            
-            logger.info("✅ Training loop completed successfully")
-            return training_results
-    
+
     def _train_epoch(self, model: nn.Module, dataloader: DataLoader, 
                     criterion: nn.Module, optimizer: optim.Optimizer, 
                     device: torch.device) -> Dict[str, float]:
@@ -541,7 +597,8 @@ class FinetuningAgent(BaseAgent):
             'accuracy': correct / total if total > 0 else 0.0
         }
     
-    def _evaluate_final_performance(self, state: PruningState) -> Dict[str, Any]:
+    def _evaluate_final_performance(self, state: PruningState, 
+                                  training_results: Dict[str, Any]) -> Dict[str, Any]:
         """Evaluate final performance after fine-tuning."""
         
         with self.profiler.timer("final_evaluation"):
@@ -549,39 +606,44 @@ class FinetuningAgent(BaseAgent):
             
             model = state.model
             
-            # Use validation dataloader if available
-            eval_dataloader = getattr(state, 'val_dataloader', None)
-            if eval_dataloader is None:
-                eval_dataloader = getattr(state, 'test_dataloader', None)
+            eval_dataloader = self._get_evaluation_dataloader(state)
             
             if eval_dataloader is None:
                 logger.warning("⚠️ No evaluation dataloader available")
                 return {
-                    'accuracy': 0.0,
+                    'top1_accuracy': training_results.get('best_accuracy', 0.0),
+                    'top5_accuracy': 0.0,
                     'loss': float('inf'),
-                    'message': 'No evaluation data available'
+                    'total_samples': 0,
+                    'inference_time': 0.0,
+                    'message': 'No evaluation data available - using training accuracy'
                 }
             
-            # Evaluate model
-            self.accuracy_tracker.reset()
-            final_result = self.accuracy_tracker.evaluate_model(
-                model=model,
-                dataloader=eval_dataloader,
-                criterion=nn.CrossEntropyLoss(),
-                max_batches=100  # More thorough evaluation
-            )
-            
-            final_performance = {
-                'top1_accuracy': final_result.top1_accuracy,
-                'top5_accuracy': final_result.top5_accuracy,
-                'loss': final_result.loss,
-                'total_samples': final_result.total_samples,
-                'inference_time': final_result.inference_time
-            }
-            
-            logger.info(f"📊 Final performance: {final_result.top1_accuracy:.1%} accuracy")
-            return final_performance
-    
+            try:
+                self.accuracy_tracker.reset()
+                final_result = self.accuracy_tracker.evaluate_model(
+                    model=model,
+                    dataloader=eval_dataloader,
+                    criterion=nn.CrossEntropyLoss(),
+                    max_batches=100  # More thorough evaluation
+                )
+                
+                final_performance = self._extract_evaluation_metrics(final_result)
+                
+                logger.info(f"📊 Final performance: {final_performance['top1_accuracy']:.1%} accuracy")
+                return final_performance
+                
+            except Exception as e:
+                logger.error(f"❌ Final evaluation failed: {str(e)}")
+                return {
+                    'top1_accuracy': training_results.get('best_accuracy', 0.0),
+                    'top5_accuracy': 0.0,
+                    'loss': float('inf'),
+                    'total_samples': 0,
+                    'inference_time': 0.0,
+                    'error': str(e)
+                }
+
     def _analyze_performance_improvement(self, baseline: Dict[str, Any],
                                        final: Dict[str, Any],
                                        training: Dict[str, Any]) -> Dict[str, Any]:
