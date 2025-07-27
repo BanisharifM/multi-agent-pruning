@@ -12,7 +12,6 @@ import json
 from datetime import datetime
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 
 from .base_agent import BaseAgent, AgentResponse
 from ..core.state_manager import PruningState
@@ -75,25 +74,6 @@ class PruningAgent(BaseAgent):
         
         logger.info("✂️ Pruning Agent components initialized with configuration")
 
-    def _check_if_model_already_pruned(self, state: PruningState) -> bool:
-        """Check if the model has already been pruned."""
-        
-        # Check if pruning results already exist
-        if hasattr(state, 'pruning_results') and state.pruning_results:
-            logger.warning("⚠️ Model appears to already be pruned - will re-prune")
-            return True
-        
-        # Check if model has been modified from original
-        if hasattr(state, 'original_model_complexity'):
-            current_complexity = compute_model_complexity(state.model)
-            original_complexity = state.original_model_complexity
-            
-            if current_complexity['total_params'] < original_complexity['total_params']:
-                logger.warning("⚠️ Model parameter count is reduced - may already be pruned")
-                return True
-        
-        return False
-
     def execute(self, state: PruningState) -> Dict[str, Any]:
         """
         Execute pruning phase: apply structured pruning with safety checks.
@@ -109,17 +89,9 @@ class PruningAgent(BaseAgent):
             logger.info("✂️ Starting Pruning Agent execution")
             
             try:
+                # Validate input state
                 if not self._validate_input_state(state):
                     return self._create_error_result("Invalid input state for pruning")
-                
-                # Check if model is already pruned
-                if self._check_if_model_already_pruned(state):
-                    logger.info("ℹ️ Model may already be pruned, continuing with re-pruning")
-                
-                # Store original model complexity for comparison
-                if not hasattr(state, 'original_model_complexity'):
-                    state.original_model_complexity = compute_model_complexity(state.model)
-                    logger.info(f"📊 Original model: {state.original_model_complexity['total_params']:,} parameters")
                 
                 # Create checkpoint before pruning
                 self._create_checkpoint(state, "pre_pruning")
@@ -129,10 +101,6 @@ class PruningAgent(BaseAgent):
                 
                 # Execute pruning pipeline
                 pruning_results = self._execute_pruning_pipeline(state)
-                
-                if not pruning_results or not pruning_results.get('success', False):
-                    logger.error("❌ Pruning pipeline failed")
-                    return self._create_error_result("Pruning pipeline execution failed")
                 
                 # Validate pruned model
                 validation_results = self._validate_pruned_model(state, pruning_results)
@@ -151,8 +119,9 @@ class PruningAgent(BaseAgent):
                     'next_agent': 'FinetuningAgent'
                 }
                 
+                # Update state with pruned model
+                state.model = pruning_results['pruned_model']
                 state.pruning_results = pruning_results
-                state.model = pruning_results.get('pruned_model', state.model)
                 
                 # Store results
                 self.pruning_results = pruning_results
@@ -162,99 +131,48 @@ class PruningAgent(BaseAgent):
                 
             except Exception as e:
                 logger.error(f"❌ Pruning Agent execution failed: {str(e)}")
-                return self._create_error_result(f"Pruning execution failed: {str(e)}")
-
-    def _get_training_dataloader(self, state: PruningState) -> Optional[DataLoader]:
-        """Get training dataloader from state with multiple fallback options."""
-        
-        # Try different attribute names for training dataloader
-        train_loader_attrs = [
-            'train_dataloader', 'train_loader', 'training_loader', 
-            'dataloader', 'data_loader'
-        ]
-        
-        for attr_name in train_loader_attrs:
-            if hasattr(state, attr_name):
-                loader = getattr(state, attr_name)
-                if loader is not None:
-                    logger.info(f"📊 Found training dataloader: state.{attr_name}")
-                    return loader
-        
-        # Try to find in nested attributes
-        if hasattr(state, 'analysis_results') and isinstance(state.analysis_results, dict):
-            for attr_name in train_loader_attrs:
-                if attr_name in state.analysis_results:
-                    loader = state.analysis_results[attr_name]
-                    if loader is not None:
-                        logger.info(f"📊 Found training dataloader in analysis_results.{attr_name}")
-                        return loader
-        
-        logger.warning("⚠️ No training dataloader found in state")
-        return None
-
-    def _get_evaluation_dataloader(self, state: PruningState) -> Optional[DataLoader]:
-        """Get evaluation dataloader from state with multiple fallback options."""
-        
-        # Try different attribute names for evaluation dataloader
-        eval_loader_attrs = [
-            'val_dataloader', 'val_loader', 'validation_loader',
-            'test_dataloader', 'test_loader', 'eval_dataloader', 'eval_loader'
-        ]
-        
-        for attr_name in eval_loader_attrs:
-            if hasattr(state, attr_name):
-                loader = getattr(state, attr_name)
-                if loader is not None:
-                    logger.info(f"📊 Found evaluation dataloader: state.{attr_name}")
-                    return loader
-        
-        # Try to find in nested attributes
-        if hasattr(state, 'analysis_results') and isinstance(state.analysis_results, dict):
-            for attr_name in eval_loader_attrs:
-                if attr_name in state.analysis_results:
-                    loader = state.analysis_results[attr_name]
-                    if loader is not None:
-                        logger.info(f"📊 Found evaluation dataloader in analysis_results.{attr_name}")
-                        return loader
-        
-        logger.warning("⚠️ No evaluation dataloader found in state")
-        return None
-
+                
+                # Attempt recovery
+                recovery_result = self._attempt_recovery(state, str(e))
+                
+                return self._create_error_result(
+                    f"Pruning execution failed: {str(e)}",
+                    recovery_info=recovery_result
+                )
+    
     def _validate_input_state(self, state: PruningState) -> bool:
-        """Validate that the input state contains required data for pruning."""
+        """Validate that the input state contains required analysis results."""
         
-        required_fields = ['model']  # Removed 'pruning_results' - we CREATE this
+        required_fields = ['model', 'analysis_results']
         
         for field in required_fields:
             if not hasattr(state, field) or getattr(state, field) is None:
                 logger.error(f"❌ Missing required field in state: {field}")
                 return False
         
-        # Check for analysis results (from previous agents)
-        if not hasattr(state, 'analysis_results') or not state.analysis_results:
-            logger.warning("⚠️ No analysis results found - will use default pruning strategy")
-        else:
-            logger.info("✅ Analysis results found")
+        # Check analysis results structure
+        analysis_results = state.analysis_results
+        if not isinstance(analysis_results, dict):
+            logger.error("❌ Analysis results must be a dictionary")
+            return False
         
-        # Check for profiling results (from profiling agent)
-        if not hasattr(state, 'profiling_results') or not state.profiling_results:
-            logger.warning("⚠️ No profiling results found - will use basic profiling")
-        else:
-            logger.info("✅ Profiling results found")
+        required_analysis_fields = ['strategic_recommendations']
+        for field in required_analysis_fields:
+            if field not in analysis_results:
+                logger.error(f"❌ Missing required analysis field: {field}")
+                return False
         
-        # Check for dataloaders (needed for gradient-based importance criteria)
-        train_loader = self._get_training_dataloader(state)
-        if train_loader is None:
-            logger.info("ℹ️ No training dataloader found - will create dummy dataloader for gradient-based criteria")
-        else:
-            logger.info("✅ Training dataloader found")
+        # Check for dataloader availability (informational)
+        has_dataloader = False
+        for attr_name in ['dataloader', 'train_loader', 'val_loader', 'test_loader']:
+            if hasattr(state, attr_name) and getattr(state, attr_name) is not None:
+                has_dataloader = True
+                break
         
-        # Check for evaluation data
-        eval_loader = self._get_evaluation_dataloader(state)
-        if eval_loader is None:
-            logger.info("ℹ️ No evaluation dataloader found - will create dummy dataloader if needed")
+        if not has_dataloader:
+            logger.info("ℹ️ No dataloader found in state - will create dummy dataloader for gradient-based criteria")
         else:
-            logger.info("✅ Evaluation dataloader found")
+            logger.info("✅ Dataloader available for gradient-based importance criteria")
         
         logger.info("✅ Input state validation passed")
         return True
@@ -733,10 +651,9 @@ class PruningAgent(BaseAgent):
             criterion = self._normalize_criterion_name(criterion)
 
             # DEBUG MODE
-            # criterion = 'magnitude_l1'  # Force L1 for debugging
-            criterion = 'magnitude_l2'  # Force L2 for debugging
+            criterion = 'magnitude_l1'  # Force L1 for debugging
+            # criterion = 'magnitude_l2'  # Force L2 for debugging
 
-            
             logger.info(f"📊 Using importance criterion: {criterion}")
             
             data_loader = self._get_dataloader_for_importance(state, criterion)
@@ -1156,64 +1073,43 @@ class PruningAgent(BaseAgent):
             with self.profiler.timer("llm_validation"):
                 response = None
                 
-                try:
-                    # Try OpenAI-style chat completion
-                    if hasattr(self.llm_client, 'chat') and hasattr(self.llm_client.chat, 'completions'):
-                        response = self.llm_client.chat.completions.create(
-                            model="gpt-4o-mini",
-                            messages=[{"role": "user", "content": prompt}],
-                            max_tokens=500,
-                            temperature=0.1
-                        )
-                        if hasattr(response, 'choices') and len(response.choices) > 0:
-                            response = response.choices[0].message.content
-                    
-                    # Try direct method calls
-                    elif hasattr(self.llm_client, 'generate') and callable(self.llm_client.generate):
-                        response = self.llm_client.generate(prompt)
-                    elif hasattr(self.llm_client, 'complete') and callable(self.llm_client.complete):
-                        response = self.llm_client.complete(prompt)
-                    elif hasattr(self.llm_client, 'invoke') and callable(self.llm_client.invoke):
-                        response = self.llm_client.invoke(prompt)
-                    elif hasattr(self.llm_client, 'predict') and callable(self.llm_client.predict):
-                        response = self.llm_client.predict(prompt)
-                    elif callable(self.llm_client):
-                        # If the client itself is callable
-                        response = self.llm_client(prompt)
-                    else:
-                        # Try to find any callable method that might work
-                        for attr_name in ['chat', 'generate', 'complete', 'invoke', 'predict', 'call']:
-                            if hasattr(self.llm_client, attr_name):
-                                attr = getattr(self.llm_client, attr_name)
-                                if callable(attr):
-                                    try:
-                                        response = attr(prompt)
-                                        break
-                                    except Exception as method_e:
-                                        logger.debug(f"Method {attr_name} failed: {method_e}")
-                                        continue
-                    
-                    if response is None:
-                        raise ValueError("No suitable method found on LLM client")
-                    
-                except Exception as llm_e:
-                    logger.warning(f"⚠️ LLM validation failed: {str(llm_e)}")
-                    return {
-                        'status': 'llm_error',
-                        'message': f'LLM validation failed: {str(llm_e)}',
-                        'fallback_validation': 'Using rule-based validation instead'
-                    }
+                # Try different method names for LLM generation
+                if hasattr(self.llm_client, 'generate'):
+                    response = self.llm_client.generate(prompt)
+                elif hasattr(self.llm_client, 'chat'):
+                    response = self.llm_client.chat(prompt)
+                elif hasattr(self.llm_client, 'complete'):
+                    response = self.llm_client.complete(prompt)
+                elif hasattr(self.llm_client, 'invoke'):
+                    response = self.llm_client.invoke(prompt)
+                elif hasattr(self.llm_client, 'predict'):
+                    response = self.llm_client.predict(prompt)
+                elif callable(self.llm_client):
+                    # If the client itself is callable
+                    response = self.llm_client(prompt)
+                else:
+                    # Try to find any callable method
+                    for attr_name in dir(self.llm_client):
+                        if not attr_name.startswith('_'):
+                            attr = getattr(self.llm_client, attr_name)
+                            if callable(attr):
+                                try:
+                                    response = attr(prompt)
+                                    break
+                                except:
+                                    continue
+                
+                if response is None:
+                    raise ValueError("No suitable method found on LLM client")
                 
                 # Handle different response formats
                 if isinstance(response, dict):
-                    if 'content' in response:
-                        response_text = response['content']
-                    elif 'text' in response:
-                        response_text = response['text']
-                    elif 'message' in response:
-                        response_text = response['message']
-                    else:
-                        response_text = str(response)
+                    # Extract text from dict response
+                    response_text = response.get('text', response.get('content', response.get('response', str(response))))
+                elif hasattr(response, 'content'):
+                    response_text = response.content
+                elif hasattr(response, 'text'):
+                    response_text = response.text
                 else:
                     response_text = str(response)
                 
@@ -1226,9 +1122,10 @@ class PruningAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"⚠️ LLM validation failed: {str(e)}")
             return {
-                'status': 'llm_error',
-                'message': f'LLM validation failed: {str(e)}',
-                'fallback_validation': 'Using rule-based validation instead'
+                'status': 'llm_validation_failed',
+                'error': str(e),
+                'fallback_used': True,
+                'message': 'LLM validation unavailable, using rule-based validation'
             }
 
     def _attempt_recovery(self, state: PruningState, error_message: str) -> Dict[str, Any]:
@@ -1716,75 +1613,27 @@ Please provide validation in JSON format:
                 'raw_response': response
             }
     
-    def _create_error_result(self, error_message: str) -> Dict[str, Any]:
+    def _create_error_result(self, error_message: str, 
+                           recovery_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Create standardized error result."""
         
-        return {
+        result = {
             'success': False,
             'agent_name': self.agent_name,
             'timestamp': datetime.now().isoformat(),
             'error': error_message,
-            'error_type': 'pruning_agent_error',
-            'recovery_suggestions': [
-                "Check if model and analysis results are available",
-                "Verify importance criteria configuration",
-                "Check dataloader availability for gradient-based criteria",
-                "Review pruning target ratio (may be too aggressive)",
-                "Check model architecture compatibility"
-            ],
-            'debug_info': {
-                'has_model': hasattr(self, 'model') if hasattr(self, 'model') else False,
-                'has_importance_criteria': self.importance_criteria is not None,
-                'has_pruning_engine': self.pruning_engine is not None,
-                'available_criteria': self.get_available_criteria() if hasattr(self, 'get_available_criteria') else []
-            }
+            'next_agent': None
         }
+        
+        if recovery_info:
+            result['recovery_info'] = recovery_info
+        
+        return result
 
     def get_agent_role(self) -> str:
         """Return the role of this agent."""
         return "pruning_agent"
     
-    def _get_pruning_recommendations(self, state: PruningState) -> Dict[str, Any]:
-        """Get pruning recommendations from analysis results with fallbacks."""
-        
-        # Try to get from analysis results
-        if hasattr(state, 'analysis_results') and isinstance(state.analysis_results, dict):
-            analysis_results = state.analysis_results
-            
-            # Look for recommendations in various places
-            if 'recommendations' in analysis_results:
-                return analysis_results['recommendations']
-            elif 'pruning_recommendations' in analysis_results:
-                return analysis_results['pruning_recommendations']
-            elif 'strategic_recommendations' in analysis_results:
-                return analysis_results['strategic_recommendations']
-        
-        # Try to get from profiling results
-        if hasattr(state, 'profiling_results') and isinstance(state.profiling_results, dict):
-            profiling_results = state.profiling_results
-            
-            if 'recommended_ratios' in profiling_results:
-                return {
-                    'importance_criterion': 'magnitude_l1',
-                    'target_ratio': 0.5,
-                    'group_ratios': profiling_results['recommended_ratios']
-                }
-        
-        # Default fallback recommendations
-        logger.warning("⚠️ No recommendations found, using default pruning strategy")
-        return {
-            'importance_criterion': 'magnitude_l1',
-            'target_ratio': 0.5,
-            'group_ratios': {
-                'attention': 0.3,
-                'mlp': 0.5,
-                'embedding': 0.1,
-                'classifier': 0.0
-            },
-            'safety_checks': True,
-            'validate_constraints': True
-        }
-
     def get_system_prompt(self, context: Dict[str, Any]) -> str:
         """Generate system prompt for the pruning agent."""
         
@@ -1885,3 +1734,4 @@ Respond with structured decisions including rationale, safety validation, and ex
                 message=f"Failed to parse pruning response: {str(e)}",
                 confidence=0.0
             )
+
