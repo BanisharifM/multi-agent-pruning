@@ -10,7 +10,7 @@ __url__ = "https://github.com/BanisharifM/Multi-Agent-Pruning"
 VERSION_INFO = {
     'major': 0,
     'minor': 2, 
-    'patch': 3,
+    'patch': 4,
     'pre_release': None,
     'build': None
 }
