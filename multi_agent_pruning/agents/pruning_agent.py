@@ -769,54 +769,174 @@ class PruningAgent(BaseAgent):
         logger.warning(f"⚠️ Could not determine target ratio, using fallback: {fallback}")
         return fallback
 
-    def _create_default_group_ratios(self, model: torch.nn.Module, target_ratio: float) -> Dict[str, float]:
-        """Create default group ratios based on model architecture."""
+    def _detect_architecture_type(self, model: nn.Module) -> str:
+        """Detect the architecture type of the model."""
         
-        # Analyze model architecture to create sensible defaults
-        layer_types = {}
-        for name, module in model.named_modules():
-            if isinstance(module, torch.nn.Linear):
-                if 'mlp' in name.lower() or 'fc' in name.lower():
-                    layer_types['mlp'] = layer_types.get('mlp', 0) + 1
-                elif 'head' in name.lower() or 'classifier' in name.lower():
-                    layer_types['head'] = layer_types.get('head', 0) + 1
-                else:
-                    layer_types['linear'] = layer_types.get('linear', 0) + 1
-            elif isinstance(module, torch.nn.Conv2d):
-                layer_types['conv'] = layer_types.get('conv', 0) + 1
-            elif 'attention' in name.lower() or 'attn' in name.lower():
-                layer_types['attention'] = layer_types.get('attention', 0) + 1
+        model_name = model.__class__.__name__.lower()
         
-        # Create conservative ratios based on layer types
-        group_ratios = {}
+        # Check for Vision Transformer indicators
+        if any(indicator in model_name for indicator in ['vit', 'deit', 'transformer']):
+            return 'vision_transformer'
         
-        if layer_types.get('mlp', 0) > 0:
-            group_ratios['mlp'] = min(target_ratio * 0.8, 0.3)  # Conservative for MLP
+        # Check for CNN indicators
+        if any(indicator in model_name for indicator in ['resnet', 'convnet', 'efficientnet', 'mobilenet']):
+            return 'cnn'
         
-        if layer_types.get('attention', 0) > 0:
-            group_ratios['attention'] = min(target_ratio * 0.6, 0.2)  # Very conservative for attention
+        # Check module composition
+        has_attention = any('attention' in name.lower() for name, _ in model.named_modules())
+        has_conv = any(isinstance(module, nn.Conv2d) for module in model.modules())
         
-        if layer_types.get('conv', 0) > 0:
-            group_ratios['conv'] = target_ratio  # Standard for conv layers
-        
-        if layer_types.get('linear', 0) > 0:
-            group_ratios['linear'] = target_ratio * 0.9  # Slightly conservative for linear
-        
-        if layer_types.get('head', 0) > 0:
-            group_ratios['head'] = min(target_ratio * 0.5, 0.1)  # Very conservative for head
-        
-        # Fallback uniform ratio
-        if not group_ratios:
-            group_ratios['uniform'] = target_ratio
-        
-        logger.info(f"📊 Created default group ratios: {group_ratios}")
-        return group_ratios
+        if has_attention and not has_conv:
+            return 'vision_transformer'
+        elif has_conv and not has_attention:
+            return 'cnn'
+        else:
+            return 'hybrid'
 
-    def _apply_structured_pruning(self, state: PruningState, recommendations: Dict[str, Any],
+    def _create_default_group_ratios(self, model: nn.Module, target_ratio: float) -> Dict[str, float]:
+        """Create sensible default group ratios based on model architecture."""
+        
+        # Detect architecture type for better defaults
+        arch_type = self._detect_architecture_type(model)
+        
+        if arch_type == 'vision_transformer':
+            ratios = {
+                'mlp': min(target_ratio * 0.6, 0.8),        # MLP blocks can handle more pruning
+                'attention': min(target_ratio * 0.4, 0.6),   # Attention is more sensitive
+                'head': min(target_ratio * 0.2, 0.3),        # Classification head is very sensitive
+                'linear': min(target_ratio * 0.9, 0.8),      # Other linear layers
+                'conv': min(target_ratio * 1.0, 0.7)         # Any conv layers (rare in ViT)
+            }
+        elif arch_type == 'cnn':
+            ratios = {
+                'conv': min(target_ratio * 1.0, 0.7),        # Conv layers are robust
+                'linear': min(target_ratio * 0.9, 0.8),      # FC layers
+                'head': min(target_ratio * 0.2, 0.3),        # Classification head
+                'mlp': min(target_ratio * 0.6, 0.8),         # Any MLP components
+                'attention': min(target_ratio * 0.4, 0.6)    # Any attention components
+            }
+        else:
+            # Generic defaults
+            ratios = {
+                'mlp': min(target_ratio * 0.6, 0.8),
+                'attention': min(target_ratio * 0.4, 0.6),
+                'conv': min(target_ratio * 1.0, 0.7),
+                'linear': min(target_ratio * 0.9, 0.8),
+                'head': min(target_ratio * 0.2, 0.3)
+            }
+        
+        logger.info(f"📊 Created default group ratios for {arch_type}: {ratios}")
+        return ratios
+
+    def _extract_ratios_from_structured_format(self, pruning_ratios: Dict[str, Any], 
+                                            target_ratio: float) -> Dict[str, float]:
+        """
+        Extract group ratios from structured pruning_ratios format.
+        
+        The analysis agent might provide ratios in various structured formats.
+        This method handles different possible structures.
+        """
+        
+        # Check for nested structure with 'recommended_ratios'
+        if 'recommended_ratios' in pruning_ratios:
+            return pruning_ratios['recommended_ratios']
+        
+        # Check for nested structure with 'group_ratios'
+        if 'group_ratios' in pruning_ratios:
+            return pruning_ratios['group_ratios']
+        
+        # Check for direct group names
+        group_keys = ['mlp', 'attention', 'conv', 'linear', 'head', 'mlp_blocks', 'attention_blocks']
+        extracted_ratios = {}
+        
+        for key, value in pruning_ratios.items():
+            if key in group_keys and isinstance(value, (int, float)):
+                extracted_ratios[key] = float(value)
+        
+        if extracted_ratios:
+            logger.info(f"📊 Extracted ratios from structured format: {extracted_ratios}")
+            return extracted_ratios
+        
+        # If no recognizable structure, log the format and create defaults
+        logger.warning(f"⚠️ Unrecognized pruning_ratios structure: {pruning_ratios}")
+        logger.info("📊 Creating default ratios based on target ratio")
+        
+        # Create simple defaults based on target ratio
+        return {
+            'mlp': target_ratio * 0.6,      # MLP can handle more pruning
+            'attention': target_ratio * 0.4, # Attention is more sensitive
+            'conv': target_ratio * 1.0,     # Conv layers are robust
+            'linear': target_ratio * 0.9,   # Linear layers are fairly robust
+            'head': target_ratio * 0.2      # Classification head is very sensitive
+        }
+
+    def _extract_group_ratios_from_recommendations(self, recommendations: Dict[str, Any], 
+                                                model: nn.Module, target_ratio: float) -> Dict[str, float]:
+        """
+        Extract group ratios from analysis agent recommendations.
+        
+        The analysis agent provides 'pruning_ratios' and 'group_multipliers' instead of 'group_ratios'.
+        This method properly combines them to create the expected group_ratios format.
+        """
+        
+        # Method 1: Check if group_ratios is directly provided (backward compatibility)
+        if 'group_ratios' in recommendations:
+            group_ratios_data = recommendations['group_ratios']
+            
+            if isinstance(group_ratios_data, dict):
+                if 'recommended_ratios' in group_ratios_data:
+                    return group_ratios_data['recommended_ratios']
+                else:
+                    return group_ratios_data
+            elif isinstance(group_ratios_data, str):
+                logger.warning(f"⚠️ group_ratios is a string: {group_ratios_data}, creating defaults")
+                return self._create_default_group_ratios(model, target_ratio)
+            else:
+                logger.warning(f"⚠️ Unexpected group_ratios type: {type(group_ratios_data)}, using defaults")
+                return self._create_default_group_ratios(model, target_ratio)
+        
+        # Method 2: Extract from pruning_ratios and group_multipliers (NEW - main fix)
+        elif 'pruning_ratios' in recommendations:
+            logger.info("📊 Extracting group ratios from 'pruning_ratios' field")
+            
+            pruning_ratios = recommendations['pruning_ratios']
+            group_multipliers = recommendations.get('group_multipliers', {})
+            
+            # If pruning_ratios is a dict with group-specific ratios, use it directly
+            if isinstance(pruning_ratios, dict):
+                # Check if it contains group-specific ratios
+                if any(key in pruning_ratios for key in ['mlp', 'attention', 'conv', 'linear', 'head']):
+                    base_ratios = pruning_ratios
+                else:
+                    # It might be a structured format, try to extract
+                    base_ratios = self._extract_ratios_from_structured_format(pruning_ratios, target_ratio)
+            else:
+                # If it's not a dict, create default ratios
+                logger.info("📊 pruning_ratios is not a dict, creating architecture-specific defaults")
+                base_ratios = self._create_default_group_ratios(model, target_ratio)
+            
+            # Apply group multipliers if available
+            if group_multipliers:
+                logger.info(f"📊 Applying group multipliers: {group_multipliers}")
+                final_ratios = {}
+                for group_name, base_ratio in base_ratios.items():
+                    multiplier = group_multipliers.get(group_name, 1.0)
+                    final_ratios[group_name] = min(base_ratio * multiplier, 0.9)  # Cap at 90%
+                return final_ratios
+            else:
+                return base_ratios
+        
+        # Method 3: Fallback to defaults with informative logging
+        else:
+            logger.warning("⚠️ No group ratio information found in recommendations, creating defaults")
+            logger.info(f"📊 Available recommendation keys: {list(recommendations.keys())}")
+            return self._create_default_group_ratios(model, target_ratio)
+
+    def _apply_structured_pruning(self, state: PruningState, recommendations: Dict[str, Any], 
                                 importance_results: Dict[str, Any]) -> Dict[str, Any]:
         """Apply structured pruning based on importance scores and recommendations."""
         
-        with self.profiler.timer("structured_pruning_application"):
+        with self.profiler.timer("structured_pruning"):
             logger.info("✂️ Applying structured pruning")
             
             model = state.model
@@ -826,25 +946,13 @@ class PruningAgent(BaseAgent):
             
             importance_scores = importance_results['importance_scores']
             
-            if 'group_ratios' not in recommendations:
-                logger.warning("⚠️ Missing 'group_ratios' in recommendations, creating default ratios")
-                # Create sensible default group ratios based on model architecture
-                group_ratios = self._create_default_group_ratios(model, target_ratio)
-            else:
-                group_ratios_data = recommendations['group_ratios']
-                
-                if isinstance(group_ratios_data, dict):
-                    if 'recommended_ratios' in group_ratios_data:
-                        group_ratios = group_ratios_data['recommended_ratios']
-                    else:
-                        group_ratios = group_ratios_data
-                elif isinstance(group_ratios_data, str):
-                    # Handle case where group_ratios is a string description
-                    logger.warning(f"⚠️ group_ratios is a string: {group_ratios_data}, creating defaults")
-                    group_ratios = self._create_default_group_ratios(model, target_ratio)
-                else:
-                    logger.warning(f"⚠️ Unexpected group_ratios type: {type(group_ratios_data)}, using defaults")
-                    group_ratios = self._create_default_group_ratios(model, target_ratio)
+            # FIX: Properly extract group ratios from analysis agent recommendations
+            group_ratios = self._extract_group_ratios_from_recommendations(
+                recommendations, model, target_ratio
+            )
+            
+            # Log the extracted group ratios for debugging
+            logger.info(f"📊 Using group ratios: {group_ratios}")
             
             # Apply pruning using the engine
             try:
@@ -859,22 +967,15 @@ class PruningAgent(BaseAgent):
                 
                 results = {
                     'success': True,
-                    'pruned_model': pruned_model,
-                    'original_parameters': original_params,
-                    'pruned_parameters': pruned_params,
-                    'achieved_pruning_ratio': achieved_ratio,
-                    'target_pruning_ratio': target_ratio,
-                    'ratio_accuracy': abs(achieved_ratio - target_ratio) < 0.05,
-                    'layers_pruned': list(importance_scores.keys()),  # List of analyzed layers
-                    'pruning_statistics': {
-                        'method': 'structured_pruning',
-                        'group_ratios_used': group_ratios,
-                        'importance_criterion': importance_results.get('criterion_used', 'unknown')
-                    },
-                    'safety_checks_passed': True
+                    'target_ratio': target_ratio,
+                    'achieved_ratio': achieved_ratio,
+                    'original_params': original_params,
+                    'pruned_params': pruned_params,
+                    'group_ratios': group_ratios,
+                    'pruned_model': pruned_model
                 }
                 
-                logger.info(f"✅ Structured pruning applied successfully")
+                logger.info("✅ Structured pruning applied successfully")
                 logger.info(f"   Target ratio: {target_ratio:.1%}")
                 logger.info(f"   Achieved ratio: {achieved_ratio:.1%}")
                 logger.info(f"   Parameters: {original_params:,} → {pruned_params:,}")
@@ -882,7 +983,7 @@ class PruningAgent(BaseAgent):
                 return results
                 
             except Exception as e:
-                logger.error(f"❌ Structured pruning failed: {str(e)}")
+                logger.error(f"❌ Structured pruning failed: {e}")
                 raise
 
     def _validate_constraints(self, state: PruningState, 
