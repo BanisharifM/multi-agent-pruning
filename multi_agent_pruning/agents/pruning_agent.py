@@ -177,6 +177,83 @@ class PruningAgent(BaseAgent):
         logger.info("✅ Input state validation passed")
         return True
 
+    def _validate_model_integrity(self, model, pruning_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate that the pruned model maintains structural integrity."""
+        
+        violations = []
+        warnings = []
+        
+        try:
+            # FIX: Use safe model name extraction
+            model_name = self._get_model_name_safely(model)
+            logger.info(f"🔍 Validating model integrity for {model_name}")
+            
+            # Check parameter count consistency
+            try:
+                actual_params = sum(p.numel() for p in model.parameters())
+                expected_params = pruning_results.get('pruned_parameters', actual_params)
+                
+                # Allow 5% tolerance
+                tolerance = 0.05
+                param_difference = abs(actual_params - expected_params) / max(expected_params, 1)
+                
+                if param_difference > tolerance:
+                    violations.append(f"Parameter count mismatch: expected {expected_params:,}, got {actual_params:,}")
+            
+            except Exception as e:
+                warnings.append(f"Could not validate parameter count: {e}")
+            
+            # Check model forward pass
+            try:
+                model.eval()
+                # Create a dummy input based on model type
+                if 'vision' in model_name.lower() or 'vit' in model_name.lower() or 'deit' in model_name.lower():
+                    # Vision model - use image-like input
+                    dummy_input = torch.randn(1, 3, 224, 224)
+                else:
+                    # Generic model - try common input size
+                    dummy_input = torch.randn(1, 1000)
+                
+                with torch.no_grad():
+                    output = model(dummy_input)
+                    if output is None:
+                        violations.append("Model forward pass returned None")
+                    elif torch.isnan(output).any():
+                        violations.append("Model output contains NaN values")
+                    elif torch.isinf(output).any():
+                        violations.append("Model output contains infinite values")
+            
+            except Exception as e:
+                warnings.append(f"Could not validate forward pass: {e}")
+            
+            # Check for disconnected parameters
+            try:
+                total_params = 0
+                connected_params = 0
+                
+                for name, param in model.named_parameters():
+                    total_params += param.numel()
+                    if param.requires_grad:
+                        connected_params += param.numel()
+                
+                if connected_params == 0:
+                    violations.append("No parameters require gradients - model may be disconnected")
+                elif connected_params < total_params * 0.1:  # Less than 10% connected
+                    warnings.append(f"Only {connected_params/total_params:.1%} of parameters require gradients")
+            
+            except Exception as e:
+                warnings.append(f"Could not validate parameter connectivity: {e}")
+            
+        except Exception as e:
+            violations.append(f"Model integrity validation failed: {e}")
+        
+        return {
+            'passed': len(violations) == 0,
+            'violations': violations,
+            'warnings': warnings,
+            'model_name': model_name if 'model_name' in locals() else 'Unknown'
+        }
+
     def _create_checkpoint(self, state: PruningState, checkpoint_name: str):
         """Create a checkpoint of the current model state."""
         
@@ -1361,12 +1438,50 @@ class PruningAgent(BaseAgent):
         # Default confidence if not found
         return 5
 
+    def _get_model_name_safely(self, model) -> str:
+        """
+        Safely extract the model name from a PyTorch model.
+        
+        This method handles various ways to get the model class name without
+        causing attribute errors.
+        """
+        
+        try:
+            # Method 1: Direct class name access (most reliable)
+            if hasattr(model, '__class__') and hasattr(model.__class__, '__name__'):
+                return model.__class__.__name__
+            
+            # Method 2: String representation parsing
+            model_str = str(type(model))
+            if 'class' in model_str and '.' in model_str:
+                # Extract from string like "<class 'timm.models.vision_transformer.VisionTransformer'>"
+                class_name = model_str.split('.')[-1].rstrip("'>")
+                if class_name:
+                    return class_name
+            
+            # Method 3: Type name
+            if hasattr(type(model), '__name__'):
+                return type(model).__name__
+            
+            # Method 4: Module name fallback
+            if hasattr(model, '__module__'):
+                module_parts = model.__module__.split('.')
+                if len(module_parts) > 0:
+                    return module_parts[-1].title() + 'Model'
+            
+            # Final fallback
+            return 'UnknownModel'
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Could not extract model name safely: {e}")
+            return 'UnknownModel'
+
     def _get_llm_validation(self, state: PruningState, pruning_results: Dict[str, Any],
                         constraint_validation: Dict[str, Any]) -> Dict[str, Any]:
         """Get LLM validation of pruning results."""
         
-        # Get model information
-        model_name = getattr(state.model, '__class__', {}).get('__name__', 'Unknown')
+        # FIX: Get model information with proper class name extraction
+        model_name = self._get_model_name_safely(state.model)
         
         # Get target ratio with fallbacks
         target_ratio = self._get_target_ratio(state, fallback=None)
@@ -2013,35 +2128,42 @@ Please provide validation in JSON format:
         pruning_config = context.get('pruning_config', {})
         safety_constraints = context.get('safety_constraints', {})
         
+        # FIX: Use safe model name extraction if model is provided in context
+        model_name = model_info.get('name', 'Unknown')
+        if 'model' in context and model_name == 'Unknown':
+            model_name = self._get_model_name_safely(context['model'])
+            model_info['name'] = model_name  # Update for consistency
+        
         prompt = f"""You are an expert Pruning Agent in a multi-agent neural network pruning system.
 
-ROLE: Execute structured pruning operations with safety guarantees and real-time monitoring.
+    ROLE: Execute structured pruning operations with safety guarantees and real-time monitoring.
 
-CURRENT CONTEXT:
-- Model: {model_info.get('name', 'Unknown')} ({model_info.get('total_params', 0):,} parameters)
-- Architecture: {model_info.get('architecture_type', 'Unknown')}
-- Target: {pruning_config.get('target_ratio', 0.5)*100:.1f}% compression
-- Method: {pruning_config.get('method', 'structured')} pruning
+    CURRENT CONTEXT:
+    - Model: {model_name} ({model_info.get('total_params', 0):,} parameters)
+    - Architecture: {model_info.get('architecture_type', 'Unknown')}
+    - Target: {pruning_config.get('target_ratio', 0.5)*100:.1f}% compression
+    - Method: {pruning_config.get('method', 'structured')} pruning
 
-SAFETY CONSTRAINTS:
-- Max MLP pruning: {safety_constraints.get('max_mlp_ratio', 0.15)*100:.1f}%
-- Max Attention pruning: {safety_constraints.get('max_attention_ratio', 0.10)*100:.1f}%
-- Min accuracy threshold: {safety_constraints.get('min_accuracy', 0.70)*100:.1f}%
+    SAFETY CONSTRAINTS:
+    - Max MLP pruning: {safety_constraints.get('max_mlp_ratio', 0.15)*100:.1f}%
+    - Max attention pruning: {safety_constraints.get('max_attention_ratio', 0.10)*100:.1f}%
+    - Critical layer protection: {safety_constraints.get('protect_critical_layers', True)}
 
-RESPONSIBILITIES:
-1. Execute coordinated pruning for coupled layers (MLP fc1↔fc2, Attention qkv↔proj)
-2. Apply importance-guided selection with safety validation
-3. Monitor accuracy degradation and trigger rollback if needed
-4. Maintain detailed statistics and progress tracking
-5. Ensure architectural constraints are preserved
+    EXECUTION GUIDELINES:
+    1. Apply group-specific pruning ratios based on analysis recommendations
+    2. Validate all dependency constraints before and after pruning
+    3. Monitor for catastrophic accuracy drops (>5% threshold)
+    4. Create recovery checkpoints at each major step
+    5. Report detailed metrics and validation results
 
-DECISION FRAMEWORK:
-- SAFETY FIRST: Always validate constraints before pruning
-- COORDINATED: Prune coupled layers together to maintain dimensions
-- MONITORED: Track accuracy after each major pruning step
-- RECOVERABLE: Maintain checkpoints for rollback capability
+    RESPONSE FORMAT:
+    - Provide structured status updates
+    - Include quantitative metrics (parameters, ratios, accuracy)
+    - Flag any safety violations immediately
+    - Suggest recovery actions if needed
 
-Respond with structured decisions including rationale, safety validation, and execution plan."""
+    Execute pruning operations with precision and safety as top priorities.
+    """
         
         return prompt
     
