@@ -38,6 +38,9 @@ class PruningAgent(BaseAgent):
         # Store configuration
         self.config = config or {}
         
+        # FIX: Initialize model_name from config or use default
+        self.model_name = self.config.get('llm_model', 'gpt-4o-mini')
+        
         # Initialize agent-specific components
         self._initialize_agent_components()
         
