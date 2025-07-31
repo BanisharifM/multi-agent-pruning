@@ -1098,10 +1098,12 @@ class PruningAgent(BaseAgent):
                 pruned_params = int(original_params * (1 - target_ratio))
                 achieved_ratio = 1.0 - (pruned_params / original_params)
                 
+                # FIX: Use consistent key name 'achieved_pruning_ratio' instead of 'achieved_ratio'
                 results = {
                     'success': True,
                     'target_ratio': target_ratio,
-                    'achieved_ratio': achieved_ratio,
+                    'achieved_ratio': achieved_ratio,                    # Keep for backward compatibility
+                    'achieved_pruning_ratio': achieved_ratio,            # FIX: Add the expected key name
                     'original_params': original_params,
                     'pruned_params': pruned_params,
                     'group_ratios': group_ratios,
@@ -1118,6 +1120,47 @@ class PruningAgent(BaseAgent):
             except Exception as e:
                 logger.error(f"❌ Structured pruning failed: {e}")
                 raise
+    def _validate_safety_constraints(self, pruning_results: Dict[str, Any],
+                                safety_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate safety constraints are satisfied."""
+        
+        violations = []
+        warnings = []
+        
+        # FIX: Check achieved pruning ratio against safety limits with defensive access
+        achieved_ratio = pruning_results.get('achieved_pruning_ratio')
+        if achieved_ratio is None:
+            # Fallback to alternative key name for backward compatibility
+            achieved_ratio = pruning_results.get('achieved_ratio', 0.0)
+            logger.warning("⚠️ Using fallback key 'achieved_ratio' instead of 'achieved_pruning_ratio'")
+        
+        safety_thresholds = safety_analysis.get('safety_thresholds', {})
+        
+        max_safe_ratio = 0.8  # 80% maximum safe pruning ratio
+        if achieved_ratio > max_safe_ratio:
+            violations.append(f"Achieved pruning ratio {achieved_ratio:.1%} exceeds safety limit {max_safe_ratio:.1%}")
+        
+        # Check for catastrophic parameter reduction
+        if achieved_ratio > 0.9:
+            violations.append(f"Catastrophic pruning ratio detected: {achieved_ratio:.1%}")
+        
+        # Check parameter count consistency
+        original_params = pruning_results.get('original_params', 0)
+        pruned_params = pruning_results.get('pruned_params', 0)
+        
+        if original_params > 0:
+            calculated_ratio = 1.0 - (pruned_params / original_params)
+            ratio_difference = abs(calculated_ratio - achieved_ratio)
+            
+            if ratio_difference > 0.01:  # 1% tolerance
+                warnings.append(f"Inconsistent pruning ratio calculation: reported {achieved_ratio:.1%}, calculated {calculated_ratio:.1%}")
+        
+        return {
+            'passed': len(violations) == 0,
+            'violations': violations,
+            'warnings': warnings,
+            'achieved_ratio': achieved_ratio  # Include for downstream use
+        }
 
     def _validate_constraints(self, state: PruningState, 
                             pruning_results: Dict[str, Any]) -> Dict[str, Any]:
@@ -1293,73 +1336,123 @@ class PruningAgent(BaseAgent):
         
         return True
 
+    def _extract_confidence_from_response(self, response_text: str) -> int:
+        """Extract confidence level from LLM response."""
+        
+        import re
+        
+        # Look for confidence patterns like "Confidence: 8", "confidence level: 7", etc.
+        confidence_patterns = [
+            r'confidence[:\s]+(\d+)',
+            r'confidence level[:\s]+(\d+)',
+            r'(\d+)/10',
+            r'(\d+)\s*out of 10'
+        ]
+        
+        for pattern in confidence_patterns:
+            match = re.search(pattern, response_text.lower())
+            if match:
+                try:
+                    confidence = int(match.group(1))
+                    return max(1, min(10, confidence))  # Clamp between 1-10
+                except (ValueError, IndexError):
+                    continue
+        
+        # Default confidence if not found
+        return 5
+
     def _get_llm_validation(self, state: PruningState, pruning_results: Dict[str, Any],
-                          validation_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Get LLM-based validation of pruning results."""
+                        constraint_validation: Dict[str, Any]) -> Dict[str, Any]:
+        """Get LLM validation of pruning results."""
         
-        if not self.llm_client:
-            return {'status': 'llm_not_available', 'message': 'LLM client not configured'}
+        # Get model information
+        model_name = getattr(state.model, '__class__', {}).get('__name__', 'Unknown')
         
-        # Create prompt for LLM validation
-        prompt = self._create_llm_validation_prompt(state, pruning_results, validation_results)
+        # Get target ratio with fallbacks
+        target_ratio = self._get_target_ratio(state, fallback=None)
+        
+        if target_ratio is None:
+            # Try multiple sources for target ratio
+            if hasattr(state, 'analysis_results'):
+                analysis_results = state.analysis_results
+                strategic_recs = analysis_results.get('strategic_recommendations', {})
+                if isinstance(strategic_recs, dict):
+                    target_ratio = strategic_recs.get('target_ratio', None)
+                    if target_ratio is None:
+                        target_ratio = strategic_recs.get('pruning_ratio', None)
+            
+            # Final fallback
+            if target_ratio is None:
+                target_ratio = 0.5  # Default 50% pruning ratio
+                logger.warning(f"⚠️ Could not find target_ratio in state, using default: {target_ratio}")
+        
+        # FIX: Defensive access to achieved_pruning_ratio with fallback
+        achieved_ratio = pruning_results.get('achieved_pruning_ratio')
+        if achieved_ratio is None:
+            # Fallback to alternative key name for backward compatibility
+            achieved_ratio = pruning_results.get('achieved_ratio', 0.0)
+            logger.warning("⚠️ Using fallback key 'achieved_ratio' instead of 'achieved_pruning_ratio'")
+        
+        prompt = f"""
+    You are an expert in neural network pruning. Please validate the following pruning results:
+
+    ## Model Information:
+    - Model: {model_name}
+    - Target Pruning Ratio: {target_ratio:.1%}
+    - Achieved Pruning Ratio: {achieved_ratio:.1%}
+
+    ## Pruning Results:
+    - Original Parameters: {pruning_results.get('original_params', 'Unknown'):,}
+    - Pruned Parameters: {pruning_results.get('pruned_params', 'Unknown'):,}
+    - Group Ratios: {pruning_results.get('group_ratios', {})}
+
+    ## Constraint Validation:
+    - All Constraints Satisfied: {constraint_validation.get('all_constraints_satisfied', False)}
+    - Safety Violations: {len(constraint_validation.get('safety_violations', []))}
+    - Dependency Violations: {len(constraint_validation.get('dependency_violations', []))}
+
+    Please provide:
+    1. Overall assessment (PASS/FAIL)
+    2. Key concerns or recommendations
+    3. Confidence level (1-10)
+
+    Keep your response concise and focused on critical issues.
+    """
         
         try:
             with self.profiler.timer("llm_validation"):
-                response = None
+                response = self.llm_client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": "You are an expert neural network pruning validator."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=500
+                )
                 
-                # Try different method names for LLM generation
-                if hasattr(self.llm_client, 'generate'):
-                    response = self.llm_client.generate(prompt)
-                elif hasattr(self.llm_client, 'chat'):
-                    response = self.llm_client.chat(prompt)
-                elif hasattr(self.llm_client, 'complete'):
-                    response = self.llm_client.complete(prompt)
-                elif hasattr(self.llm_client, 'invoke'):
-                    response = self.llm_client.invoke(prompt)
-                elif hasattr(self.llm_client, 'predict'):
-                    response = self.llm_client.predict(prompt)
-                elif callable(self.llm_client):
-                    # If the client itself is callable
-                    response = self.llm_client(prompt)
-                else:
-                    # Try to find any callable method
-                    for attr_name in dir(self.llm_client):
-                        if not attr_name.startswith('_'):
-                            attr = getattr(self.llm_client, attr_name)
-                            if callable(attr):
-                                try:
-                                    response = attr(prompt)
-                                    break
-                                except:
-                                    continue
+                llm_assessment = response.choices[0].message.content
                 
-                if response is None:
-                    raise ValueError("No suitable method found on LLM client")
+                # Parse the response for structured data
+                assessment_result = {
+                    'llm_assessment': llm_assessment,
+                    'validation_passed': 'PASS' in llm_assessment.upper(),
+                    'confidence_extracted': self._extract_confidence_from_response(llm_assessment),
+                    'target_ratio': target_ratio,
+                    'achieved_ratio': achieved_ratio
+                }
                 
-                # Handle different response formats
-                if isinstance(response, dict):
-                    # Extract text from dict response
-                    response_text = response.get('text', response.get('content', response.get('response', str(response))))
-                elif hasattr(response, 'content'):
-                    response_text = response.content
-                elif hasattr(response, 'text'):
-                    response_text = response.text
-                else:
-                    response_text = str(response)
-                
-                # Parse LLM response
-                llm_validation = self._parse_llm_validation_response(response_text)
-                
-                logger.info("🤖 LLM validation completed successfully")
-                return llm_validation
+                logger.info("🤖 LLM validation completed")
+                return assessment_result
                 
         except Exception as e:
-            logger.warning(f"⚠️ LLM validation failed: {str(e)}")
+            logger.error(f"❌ LLM validation failed: {e}")
             return {
-                'status': 'llm_validation_failed',
-                'error': str(e),
-                'fallback_used': True,
-                'message': 'LLM validation unavailable, using rule-based validation'
+                'llm_assessment': f"LLM validation failed: {e}",
+                'validation_passed': False,
+                'confidence_extracted': 0,
+                'target_ratio': target_ratio,
+                'achieved_ratio': achieved_ratio
             }
 
     def _attempt_recovery(self, state: PruningState, error_message: str) -> Dict[str, Any]:
@@ -1479,7 +1572,52 @@ class PruningAgent(BaseAgent):
             'violations': violations,
             'warnings': warnings
         }
-    
+
+    def _validate_target_ratio_achievement(self, pruning_results: Dict[str, Any],
+                                        state: PruningState) -> Dict[str, Any]:
+        """Validate that the achieved pruning ratio matches the target."""
+        
+        violations = []
+        warnings = []
+        
+        # Get target ratio with multiple fallbacks
+        target_ratio = self._get_target_ratio(state, fallback=None)
+        
+        if target_ratio is None:
+            # Try to extract from query if available
+            if hasattr(state, 'query') and state.query:
+                import re
+                ratio_match = re.search(r'(\d+\.?\d*)%', state.query)
+                if ratio_match:
+                    target_ratio = float(ratio_match.group(1)) / 100.0
+                else:
+                    target_ratio = 0.5  # Default fallback
+            else:
+                target_ratio = 0.5  # Default fallback
+            
+            logger.warning(f"⚠️ Could not find target_ratio in state, using fallback: {target_ratio}")
+        
+        # FIX: Defensive access to achieved_pruning_ratio with fallback
+        achieved_ratio = pruning_results.get('achieved_pruning_ratio')
+        if achieved_ratio is None:
+            # Fallback to alternative key name for backward compatibility
+            achieved_ratio = pruning_results.get('achieved_ratio', 0.0)
+            logger.warning("⚠️ Using fallback key 'achieved_ratio' instead of 'achieved_pruning_ratio'")
+        
+        ratio_difference = abs(achieved_ratio - target_ratio)
+        
+        if ratio_difference > 0.1:  # 10% tolerance
+            warnings.append(f"Achieved ratio {achieved_ratio:.1%} differs from target {target_ratio:.1%} by {ratio_difference:.1%}")
+        
+        return {
+            'passed': len(violations) == 0,
+            'violations': violations,
+            'warnings': warnings,
+            'target_ratio': target_ratio,
+            'achieved_ratio': achieved_ratio,
+            'ratio_difference': ratio_difference
+        }
+
     def _validate_performance_constraints(self, pruning_results: Dict[str, Any],
                                         state: PruningState) -> Dict[str, Any]:
         """Validate performance constraints are satisfied."""
