@@ -828,13 +828,132 @@ class PruningAgent(BaseAgent):
         logger.info(f"📊 Created default group ratios for {arch_type}: {ratios}")
         return ratios
 
+    def _convert_layer_specific_to_group_ratios(self, layer_ratios: Dict[str, float], 
+                                            global_ratio: float, target_ratio: float) -> Dict[str, float]:
+        """
+        Convert layer-specific ratios to group-based ratios.
+        
+        This method categorizes individual layer ratios into logical groups
+        and computes average ratios for each group.
+        """
+        
+        # Initialize group collections
+        group_layers = {
+            'mlp': [],
+            'attention': [],
+            'head': [],
+            'norm': [],
+            'embed': [],
+            'other': []
+        }
+        
+        # Categorize layers into groups based on their names
+        for layer_name, ratio in layer_ratios.items():
+            layer_name_lower = layer_name.lower()
+            
+            if any(mlp_indicator in layer_name_lower for mlp_indicator in ['mlp.fc', 'mlp.linear', 'feed_forward']):
+                group_layers['mlp'].append(ratio)
+            elif any(attn_indicator in layer_name_lower for attn_indicator in ['attn.qkv', 'attn.proj', 'attention', 'self_attn']):
+                group_layers['attention'].append(ratio)
+            elif any(head_indicator in layer_name_lower for head_indicator in ['head', 'classifier', 'fc_norm']):
+                group_layers['head'].append(ratio)
+            elif any(norm_indicator in layer_name_lower for norm_indicator in ['norm1', 'norm2', 'layer_norm', 'batch_norm']):
+                group_layers['norm'].append(ratio)
+            elif any(embed_indicator in layer_name_lower for embed_indicator in ['embed', 'patch_embed', 'pos_embed']):
+                group_layers['embed'].append(ratio)
+            else:
+                group_layers['other'].append(ratio)
+        
+        # Compute average ratios for each group
+        group_ratios = {}
+        
+        for group_name, ratios in group_layers.items():
+            if ratios:  # Only include groups that have layers
+                avg_ratio = sum(ratios) / len(ratios)
+                group_ratios[group_name] = avg_ratio
+                logger.info(f"📊 Group '{group_name}': {len(ratios)} layers, avg ratio: {avg_ratio:.3f}")
+        
+        # Ensure we have the essential groups with fallbacks
+        essential_groups = {
+            'mlp': target_ratio * 0.6,
+            'attention': target_ratio * 0.4,
+            'head': target_ratio * 0.2
+        }
+        
+        for group_name, fallback_ratio in essential_groups.items():
+            if group_name not in group_ratios:
+                # Use global_ratio if available, otherwise use fallback
+                group_ratios[group_name] = min(global_ratio, fallback_ratio) if global_ratio else fallback_ratio
+                logger.info(f"📊 Group '{group_name}': using fallback ratio {group_ratios[group_name]:.3f}")
+        
+        # Add other groups if they exist
+        if 'norm' in group_ratios:
+            # Norm layers are usually less critical, can use higher ratios
+            group_ratios['norm'] = min(group_ratios['norm'], target_ratio * 0.8)
+        
+        if 'embed' in group_ratios:
+            # Embedding layers are important, use conservative ratios
+            group_ratios['embed'] = min(group_ratios['embed'], target_ratio * 0.3)
+        
+        if 'other' in group_ratios:
+            # Other layers use moderate ratios
+            group_ratios['other'] = min(group_ratios['other'], target_ratio * 0.7)
+        
+        logger.info(f"📊 Converted layer-specific ratios to group ratios: {group_ratios}")
+        return group_ratios
+
+    def _create_group_ratios_from_global(self, global_ratio: float, target_ratio: float) -> Dict[str, float]:
+        """
+        Create group-specific ratios from a single global ratio.
+        
+        This method distributes the global ratio across different groups
+        based on their sensitivity and importance.
+        """
+        
+        logger.info(f"📊 Creating group ratios from global ratio: {global_ratio:.3f}")
+        
+        # Define sensitivity multipliers for different groups
+        # Lower multiplier = more conservative (less pruning)
+        # Higher multiplier = more aggressive (more pruning)
+        sensitivity_multipliers = {
+            'head': 0.3,        # Classification head is very sensitive
+            'attention': 0.6,   # Attention mechanisms are moderately sensitive
+            'embed': 0.4,       # Embedding layers are important
+            'norm': 1.2,        # Normalization layers are less critical
+            'mlp': 1.0,         # MLP layers are robust
+            'other': 0.8        # Other layers use moderate pruning
+        }
+        
+        group_ratios = {}
+        for group_name, multiplier in sensitivity_multipliers.items():
+            # Apply multiplier but cap at reasonable limits
+            ratio = global_ratio * multiplier
+            
+            # Apply group-specific caps
+            if group_name == 'head':
+                ratio = min(ratio, 0.3)  # Never prune more than 30% of head
+            elif group_name == 'attention':
+                ratio = min(ratio, 0.6)  # Cap attention at 60%
+            elif group_name == 'embed':
+                ratio = min(ratio, 0.4)  # Cap embedding at 40%
+            else:
+                ratio = min(ratio, 0.8)  # General cap at 80%
+            
+            # Ensure minimum ratio
+            ratio = max(ratio, 0.05)  # At least 5% pruning
+            
+            group_ratios[group_name] = ratio
+        
+        logger.info(f"📊 Created group ratios from global: {group_ratios}")
+        return group_ratios
+
     def _extract_ratios_from_structured_format(self, pruning_ratios: Dict[str, Any], 
                                             target_ratio: float) -> Dict[str, float]:
         """
         Extract group ratios from structured pruning_ratios format.
         
         The analysis agent might provide ratios in various structured formats.
-        This method handles different possible structures.
+        This method handles different possible structures including layer-specific ratios.
         """
         
         # Check for nested structure with 'recommended_ratios'
@@ -845,7 +964,22 @@ class PruningAgent(BaseAgent):
         if 'group_ratios' in pruning_ratios:
             return pruning_ratios['group_ratios']
         
-        # Check for direct group names
+        # NEW: Handle layer-specific ratios format (main fix for the warning)
+        if 'layer_specific_ratios' in pruning_ratios:
+            logger.info("📊 Processing layer-specific ratios format")
+            return self._convert_layer_specific_to_group_ratios(
+                pruning_ratios['layer_specific_ratios'],
+                pruning_ratios.get('global_ratio', target_ratio),
+                target_ratio
+            )
+        
+        # NEW: Handle global_ratio format
+        if 'global_ratio' in pruning_ratios and len(pruning_ratios) == 1:
+            logger.info("📊 Processing global ratio format")
+            global_ratio = pruning_ratios['global_ratio']
+            return self._create_group_ratios_from_global(global_ratio, target_ratio)
+        
+        # Check for direct group names (existing logic)
         group_keys = ['mlp', 'attention', 'conv', 'linear', 'head', 'mlp_blocks', 'attention_blocks']
         extracted_ratios = {}
         
@@ -854,11 +988,11 @@ class PruningAgent(BaseAgent):
                 extracted_ratios[key] = float(value)
         
         if extracted_ratios:
-            logger.info(f"📊 Extracted ratios from structured format: {extracted_ratios}")
+            logger.info(f"📊 Extracted ratios from direct group format: {extracted_ratios}")
             return extracted_ratios
         
         # If no recognizable structure, log the format and create defaults
-        logger.warning(f"⚠️ Unrecognized pruning_ratios structure: {pruning_ratios}")
+        logger.warning(f"⚠️ Unrecognized pruning_ratios structure keys: {list(pruning_ratios.keys())}")
         logger.info("📊 Creating default ratios based on target ratio")
         
         # Create simple defaults based on target ratio
@@ -875,8 +1009,7 @@ class PruningAgent(BaseAgent):
         """
         Extract group ratios from analysis agent recommendations.
         
-        The analysis agent provides 'pruning_ratios' and 'group_multipliers' instead of 'group_ratios'.
-        This method properly combines them to create the expected group_ratios format.
+        Enhanced version that handles multiple formats including layer-specific ratios.
         """
         
         # Method 1: Check if group_ratios is directly provided (backward compatibility)
@@ -895,20 +1028,20 @@ class PruningAgent(BaseAgent):
                 logger.warning(f"⚠️ Unexpected group_ratios type: {type(group_ratios_data)}, using defaults")
                 return self._create_default_group_ratios(model, target_ratio)
         
-        # Method 2: Extract from pruning_ratios and group_multipliers (NEW - main fix)
+        # Method 2: Extract from pruning_ratios and group_multipliers (ENHANCED)
         elif 'pruning_ratios' in recommendations:
             logger.info("📊 Extracting group ratios from 'pruning_ratios' field")
             
             pruning_ratios = recommendations['pruning_ratios']
             group_multipliers = recommendations.get('group_multipliers', {})
             
-            # If pruning_ratios is a dict with group-specific ratios, use it directly
+            # Enhanced handling for different pruning_ratios formats
             if isinstance(pruning_ratios, dict):
                 # Check if it contains group-specific ratios
                 if any(key in pruning_ratios for key in ['mlp', 'attention', 'conv', 'linear', 'head']):
                     base_ratios = pruning_ratios
                 else:
-                    # It might be a structured format, try to extract
+                    # Use the enhanced extraction method that handles layer-specific ratios
                     base_ratios = self._extract_ratios_from_structured_format(pruning_ratios, target_ratio)
             else:
                 # If it's not a dict, create default ratios
