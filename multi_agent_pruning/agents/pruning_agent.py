@@ -198,7 +198,10 @@ class PruningAgent(BaseAgent):
                 param_difference = abs(actual_params - expected_params) / max(expected_params, 1)
                 
                 if param_difference > tolerance:
-                    violations.append(f"Parameter count mismatch: expected {expected_params:,}, got {actual_params:,}")
+                    # FIX: Use safe formatting for parameter counts
+                    expected_str = self._format_number_safely(expected_params)
+                    actual_str = self._format_number_safely(actual_params)
+                    violations.append(f"Parameter count mismatch: expected {expected_str}, got {actual_str}")
             
             except Exception as e:
                 warnings.append(f"Could not validate parameter count: {e}")
@@ -1142,61 +1145,65 @@ class PruningAgent(BaseAgent):
             logger.info(f"📊 Available recommendation keys: {list(recommendations.keys())}")
             return self._create_default_group_ratios(model, target_ratio)
 
-    def _apply_structured_pruning(self, state: PruningState, recommendations: Dict[str, Any], 
-                                importance_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Apply structured pruning based on importance scores and recommendations."""
+def _apply_structured_pruning(self, state: PruningState, recommendations: Dict[str, Any], 
+                            importance_results: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply structured pruning based on importance scores and recommendations."""
+    
+    with self.profiler.timer("structured_pruning"):
+        logger.info("✂️ Applying structured pruning")
         
-        with self.profiler.timer("structured_pruning"):
-            logger.info("✂️ Applying structured pruning")
+        model = state.model
+        
+        # Get target ratio with multiple fallbacks
+        target_ratio = self._get_target_ratio(state, fallback=0.5)
+        
+        importance_scores = importance_results['importance_scores']
+        
+        # FIX: Properly extract group ratios from analysis agent recommendations
+        group_ratios = self._extract_group_ratios_from_recommendations(
+            recommendations, model, target_ratio
+        )
+        
+        # Log the extracted group ratios for debugging
+        logger.info(f"📊 Using group ratios: {group_ratios}")
+        
+        # Apply pruning using the engine
+        try:
+            # Calculate achieved metrics first
+            original_params = sum(p.numel() for p in model.parameters())
             
-            model = state.model
+            # For now, create a mock pruning result to avoid the missing method error
+            # This should be replaced with actual pruning logic
+            pruned_model = model  # Placeholder - actual pruning would modify this
+            pruned_params = int(original_params * (1 - target_ratio))
+            achieved_ratio = 1.0 - (pruned_params / original_params)
             
-            # Get target ratio with multiple fallbacks
-            target_ratio = self._get_target_ratio(state, fallback=0.5)
+            # FIX: Use consistent key name 'achieved_pruning_ratio' instead of 'achieved_ratio'
+            results = {
+                'success': True,
+                'target_ratio': target_ratio,
+                'achieved_ratio': achieved_ratio,                    # Keep for backward compatibility
+                'achieved_pruning_ratio': achieved_ratio,            # FIX: Add the expected key name
+                'original_params': original_params,
+                'pruned_params': pruned_params,
+                'group_ratios': group_ratios,
+                'pruned_model': pruned_model
+            }
             
-            importance_scores = importance_results['importance_scores']
+            logger.info("✅ Structured pruning applied successfully")
+            logger.info(f"   Target ratio: {target_ratio:.1%}")
+            logger.info(f"   Achieved ratio: {achieved_ratio:.1%}")
+            # FIX: Use safe formatting for parameter counts
+            original_str = self._format_number_safely(original_params)
+            pruned_str = self._format_number_safely(pruned_params)
+            logger.info(f"   Parameters: {original_str} → {pruned_str}")
             
-            # FIX: Properly extract group ratios from analysis agent recommendations
-            group_ratios = self._extract_group_ratios_from_recommendations(
-                recommendations, model, target_ratio
-            )
+            return results
             
-            # Log the extracted group ratios for debugging
-            logger.info(f"📊 Using group ratios: {group_ratios}")
-            
-            # Apply pruning using the engine
-            try:
-                # Calculate achieved metrics first
-                original_params = sum(p.numel() for p in model.parameters())
-                
-                # For now, create a mock pruning result to avoid the missing method error
-                # This should be replaced with actual pruning logic
-                pruned_model = model  # Placeholder - actual pruning would modify this
-                pruned_params = int(original_params * (1 - target_ratio))
-                achieved_ratio = 1.0 - (pruned_params / original_params)
-                
-                # FIX: Use consistent key name 'achieved_pruning_ratio' instead of 'achieved_ratio'
-                results = {
-                    'success': True,
-                    'target_ratio': target_ratio,
-                    'achieved_ratio': achieved_ratio,                    # Keep for backward compatibility
-                    'achieved_pruning_ratio': achieved_ratio,            # FIX: Add the expected key name
-                    'original_params': original_params,
-                    'pruned_params': pruned_params,
-                    'group_ratios': group_ratios,
-                    'pruned_model': pruned_model
-                }
-                
-                logger.info("✅ Structured pruning applied successfully")
-                logger.info(f"   Target ratio: {target_ratio:.1%}")
-                logger.info(f"   Achieved ratio: {achieved_ratio:.1%}")
-                logger.info(f"   Parameters: {original_params:,} → {pruned_params:,}")
-                
-                return results
-                
-            except Exception as e:
-                logger.error(f"❌ Structured pruning failed: {e}")
-                raise
+        except Exception as e:
+            logger.error(f"❌ Structured pruning failed: {e}")
+            raise
+
     def _validate_safety_constraints(self, pruning_results: Dict[str, Any],
                                 safety_analysis: Dict[str, Any]) -> Dict[str, Any]:
         """Validate safety constraints are satisfied."""
@@ -1476,6 +1483,49 @@ class PruningAgent(BaseAgent):
             logger.warning(f"⚠️ Could not extract model name safely: {e}")
             return 'UnknownModel'
 
+    def _format_number_safely(self, value) -> str:
+        """
+        Safely format a number with comma separators, handling both numeric and string values.
+        
+        Args:
+            value: The value to format (can be int, float, or string)
+            
+        Returns:
+            str: Formatted string with commas for numbers, or original string for non-numbers
+        """
+        
+        try:
+            # If it's already a string and not numeric, return as-is
+            if isinstance(value, str):
+                # Try to convert to number first
+                try:
+                    # Check if it's a numeric string
+                    if '.' in value:
+                        num_value = float(value)
+                    else:
+                        num_value = int(value)
+                    return f"{num_value:,}"
+                except (ValueError, TypeError):
+                    # Not a numeric string, return as-is
+                    return value
+            
+            # If it's a number, format with commas
+            elif isinstance(value, (int, float)):
+                if isinstance(value, float) and value.is_integer():
+                    # Format as integer if it's a whole number
+                    return f"{int(value):,}"
+                else:
+                    return f"{value:,}"
+            
+            # For other types, convert to string
+            else:
+                return str(value)
+                
+        except Exception as e:
+            # Fallback: just convert to string
+            logger.warning(f"⚠️ Could not format number safely: {e}")
+            return str(value)
+
     def _get_llm_validation(self, state: PruningState, pruning_results: Dict[str, Any],
                         constraint_validation: Dict[str, Any]) -> Dict[str, Any]:
         """Get LLM validation of pruning results."""
@@ -1508,6 +1558,14 @@ class PruningAgent(BaseAgent):
             achieved_ratio = pruning_results.get('achieved_ratio', 0.0)
             logger.warning("⚠️ Using fallback key 'achieved_ratio' instead of 'achieved_pruning_ratio'")
         
+        # FIX: Safe formatting for parameter counts that might be strings or numbers
+        original_params = pruning_results.get('original_params', 'Unknown')
+        pruned_params = pruning_results.get('pruned_params', 'Unknown')
+        
+        # Format parameters safely
+        original_params_str = self._format_number_safely(original_params)
+        pruned_params_str = self._format_number_safely(pruned_params)
+        
         prompt = f"""
     You are an expert in neural network pruning. Please validate the following pruning results:
 
@@ -1517,8 +1575,8 @@ class PruningAgent(BaseAgent):
     - Achieved Pruning Ratio: {achieved_ratio:.1%}
 
     ## Pruning Results:
-    - Original Parameters: {pruning_results.get('original_params', 'Unknown'):,}
-    - Pruned Parameters: {pruning_results.get('pruned_params', 'Unknown'):,}
+    - Original Parameters: {original_params_str}
+    - Pruned Parameters: {pruned_params_str}
     - Group Ratios: {pruning_results.get('group_ratios', {})}
 
     ## Constraint Validation:
@@ -2134,12 +2192,16 @@ Please provide validation in JSON format:
             model_name = self._get_model_name_safely(context['model'])
             model_info['name'] = model_name  # Update for consistency
         
+        # FIX: Safe formatting for parameter count
+        total_params = model_info.get('total_params', 0)
+        total_params_str = self._format_number_safely(total_params)
+        
         prompt = f"""You are an expert Pruning Agent in a multi-agent neural network pruning system.
 
     ROLE: Execute structured pruning operations with safety guarantees and real-time monitoring.
 
     CURRENT CONTEXT:
-    - Model: {model_name} ({model_info.get('total_params', 0):,} parameters)
+    - Model: {model_name} ({total_params_str} parameters)
     - Architecture: {model_info.get('architecture_type', 'Unknown')}
     - Target: {pruning_config.get('target_ratio', 0.5)*100:.1f}% compression
     - Method: {pruning_config.get('method', 'structured')} pruning
