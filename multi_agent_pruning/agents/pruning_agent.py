@@ -1476,6 +1476,19 @@ class PruningAgent(BaseAgent):
             logger.warning(f"⚠️ Could not extract model name safely: {e}")
             return 'UnknownModel'
 
+    def _format_number_safely(self, value) -> str:
+        """Safely format a number with comma separators."""
+        try:
+            if isinstance(value, str) and not value.replace('.', '').replace('-', '').isdigit():
+                return value  # Return non-numeric strings as-is
+            elif isinstance(value, (int, float)):
+                return f"{value:,}"
+            else:
+                num_value = float(value)
+                return f"{num_value:,}" if num_value.is_integer() else f"{num_value:,.2f}"
+        except (ValueError, TypeError):
+            return str(value)
+
     def _get_llm_validation(self, state: PruningState, pruning_results: Dict[str, Any],
                         constraint_validation: Dict[str, Any]) -> Dict[str, Any]:
         """Get LLM validation of pruning results."""
@@ -1517,8 +1530,8 @@ class PruningAgent(BaseAgent):
     - Achieved Pruning Ratio: {achieved_ratio:.1%}
 
     ## Pruning Results:
-    - Original Parameters: {pruning_results.get('original_params', 'Unknown'):,}
-    - Pruned Parameters: {pruning_results.get('pruned_params', 'Unknown'):,}
+    - Original Parameters: {self._format_number_safely(pruning_results.get('original_params', 'Unknown'))}
+    - Pruned Parameters: {self._format_number_safely(pruning_results.get('pruned_params', 'Unknown'))}
     - Group Ratios: {pruning_results.get('group_ratios', {})}
 
     ## Constraint Validation:
